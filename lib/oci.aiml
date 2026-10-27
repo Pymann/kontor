@@ -1,0 +1,839 @@
+# museum.oci — OCI Distribution Spec v1.1 registry (pull + push) on museum's
+# content-addressed store (contract doc/ecosystem.md §2/§3).
+#
+# Layout below <data>/oci/:
+#   repos/<name with "/" → "+">/tags/<tag>          "sha256:<hex>"
+#   repos/<name with "/" → "+">/manifests/<hex>     media type of that manifest (membership)
+#   uploads/<uuid>                                  upload session data
+#   uploads/<uuid>.repo                             repository the session belongs to
+# Blob and manifest bytes live in <data>/cas/ like every other museum blob, so
+# an image layer that is also a package or generic file is stored once.
+#
+# Authorization happens in museum.api before these methods are called.
+# Published manifests are reported in `events` ("<event>\t<data json>") for
+# the webhook hub; the caller drains the list.
+
+- namespace: museum.oci
+
+- import: "text.aiml"
+- import: "store.aiml"
+- import: "exchange.aiml"
+
+# ── names (OCI distribution spec "Pulling manifests" grammar) ────────────────
+
+# path-component: [a-z0-9]+((\.|_|__|-+)[a-z0-9]+)*
+- def:
+    name: valid_component
+    args: [[comp, string]]
+    return: i32
+    body:
+      - if:
+          condition: { or: [{ eq: [comp.len, 0] }, { gt: [comp.len, 128] }] }
+          then:
+            - return: [0]
+      - decl: [alnum, string, "abcdefghijklmnopqrstuvwxyz0123456789"]
+      - decl: [seps, string, "._-"]
+      - decl: [prev_sep, i32, 1]
+      - decl: [idx, i32, 0]
+      - while:
+          condition: { lt: [idx, comp.len] }
+          body:
+            - decl: [one, string, { call: [comp.substr, idx, 1] }]
+            - if:
+                condition: { ge: [{ call: [alnum.index_of, one] }, 0] }
+                then:
+                  - set: [prev_sep, 0]
+                else:
+                  - if:
+                      condition: { or: [{ lt: [{ call: [seps.index_of, one] }, 0] }, { eq: [prev_sep, 1] }] }
+                      then:
+                        # A leading separator, or "." after a separator: invalid.
+                        # (Runs of "-" and "__" are allowed by the grammar.)
+                        - if:
+                            condition: { or: [{ eq: [idx, 0] }, { lt: [{ call: [seps.index_of, one] }, 0] }] }
+                            then:
+                              - return: [0]
+                        - if:
+                            condition: { eq: [{ call: [one.starts_with, "."] }, 1] }
+                            then:
+                              - return: [0]
+                  - set: [prev_sep, 1]
+            - set: [idx, { +: [idx, 1] }]
+      - if:
+          condition: { eq: [prev_sep, 1] }
+          then:
+            - return: [0]
+      - return: [1]
+
+- def:
+    name: valid_name
+    args: [[name, string]]
+    return: i32
+    body:
+      - if:
+          condition: { or: [{ eq: [name.len, 0] }, { gt: [name.len, 255] }] }
+          then:
+            - return: [0]
+      - decl: [comps, list<string>, { call: [name.split, "/"] }]
+      - decl: [idx, i32, 0]
+      - while:
+          condition: { lt: [idx, comps.len] }
+          body:
+            - if:
+                condition: { eq: [{ call: [museum.oci.valid_component, { call: [comps.get, idx] }] }, 0] }
+                then:
+                  - return: [0]
+            - set: [idx, { +: [idx, 1] }]
+      - return: [1]
+
+# tag: [a-zA-Z0-9_][a-zA-Z0-9._-]{0,127}
+- def:
+    name: valid_tag
+    args: [[tag, string]]
+    return: i32
+    body:
+      - if:
+          condition: { or: [{ eq: [tag.len, 0] }, { gt: [tag.len, 128] }] }
+          then:
+            - return: [0]
+      - decl: [first, string, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_"]
+      - decl: [rest, string, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_.-"]
+      - if:
+          condition: { lt: [{ call: [first.index_of, { call: [tag.substr, 0, 1] }] }, 0] }
+          then:
+            - return: [0]
+      - decl: [idx, i32, 1]
+      - while:
+          condition: { lt: [idx, tag.len] }
+          body:
+            - if:
+                condition: { lt: [{ call: [rest.index_of, { call: [tag.substr, idx, 1] }] }, 0] }
+                then:
+                  - return: [0]
+            - set: [idx, { +: [idx, 1] }]
+      - return: [1]
+
+# "sha256:<64 lowercase hex>" → the hex, else "".
+- def:
+    name: digest_hex
+    args: [[digest, string]]
+    return: string
+    body:
+      - if:
+          condition: { or: [{ neq: [digest.len, 71] }, { eq: [{ call: [digest.starts_with, "sha256:"] }, 0] }] }
+          then:
+            - return: [""]
+      - decl: [hex, string, { call: [digest.substr, 7] }]
+      - decl: [alphabet, string, "0123456789abcdef"]
+      - decl: [idx, i32, 0]
+      - while:
+          condition: { lt: [idx, hex.len] }
+          body:
+            - if:
+                condition: { lt: [{ call: [alphabet.index_of, { call: [hex.substr, idx, 1] }] }, 0] }
+                then:
+                  - return: [""]
+            - set: [idx, { +: [idx, 1] }]
+      - return: [hex]
+
+# Is `seg` equal to `word`?  (A helper so path parsing compares two variables
+# instead of one variable against several literals.)
+- def:
+    name: is_word
+    args: [[seg, string], [word, string]]
+    return: i32
+    body:
+      - if:
+          condition: { eq: [seg, word] }
+          then:
+            - return: [1]
+      - return: [0]
+
+# Route kinds (enums inside namespaces are not supported by the compiler yet,
+# so these are plain i32 codes):
+#   0 invalid  1 base (/v2/)  2 catalog  3 tags  4 blob  5 upload  6 manifest
+- model:
+    name: Route
+    fields:
+      - [kind, i32]
+      - [repo, string, ""]
+      - [ref, string, ""]
+
+- def:
+    name: parse_route
+    args: [[url_path, string]]
+    return: museum.oci.Route
+    body:
+      - decl: [route, museum.oci.Route]
+      - decl: [parts, list<string>, { call: [url_path.split, "/"] }]
+      - decl: [count, i32, parts.len]
+      # parts[0] = "", parts[1] = "v2"
+      - if:
+          condition: { or: [{ lt: [count, 3] }, { eq: [{ call: [museum.oci.is_word, { call: [parts.get, 1] }, "v2"] }, 0] }] }
+          then:
+            - return: [route]
+      - if:
+          condition: { and: [{ eq: [count, 3] }, { eq: [{ call: [museum.oci.is_word, { call: [parts.get, 2] }, ""] }, 1] }] }
+          then:
+            - set: [route.kind, 1]
+            - return: [route]
+      - if:
+          condition: { and: [{ eq: [count, 3] }, { eq: [{ call: [museum.oci.is_word, { call: [parts.get, 2] }, "_catalog"] }, 1] }] }
+          then:
+            - set: [route.kind, 2]
+            - return: [route]
+      - if:
+          condition: { lt: [count, 5] }
+          then:
+            - return: [route]
+      - decl: [last, string, { call: [parts.get, { -: [count, 1] }] }]
+      - decl: [second, string, { call: [parts.get, { -: [count, 2] }] }]
+      - decl: [third, string, { call: [parts.get, { -: [count, 3] }] }]
+      - decl: [name_end, i32, 0]
+      - if:
+          condition: { and: [{ eq: [{ call: [museum.oci.is_word, second, "tags"] }, 1] }, { eq: [{ call: [museum.oci.is_word, last, "list"] }, 1] }] }
+          then:
+            - set: [route.kind, 3]
+            - set: [name_end, { -: [count, 2] }]
+          else:
+            - if:
+                condition: { and: [{ eq: [{ call: [museum.oci.is_word, third, "blobs"] }, 1] }, { eq: [{ call: [museum.oci.is_word, second, "uploads"] }, 1] }] }
+                then:
+                  - set: [route.kind, 5]
+                  - set: [route.ref, last]
+                  - set: [name_end, { -: [count, 3] }]
+                else:
+                  - if:
+                      condition: { eq: [{ call: [museum.oci.is_word, second, "blobs"] }, 1] }
+                      then:
+                        - set: [route.kind, 4]
+                        - set: [route.ref, last]
+                        - set: [name_end, { -: [count, 2] }]
+                      else:
+                        - if:
+                            condition: { eq: [{ call: [museum.oci.is_word, second, "manifests"] }, 1] }
+                            then:
+                              - set: [route.kind, 6]
+                              - set: [route.ref, last]
+                              - set: [name_end, { -: [count, 2] }]
+      - if:
+          condition: { le: [name_end, 2] }
+          then:
+            - set: [route.kind, 0]
+            - return: [route]
+      - decl: [repo, string, ""]
+      - decl: [idx, i32, 2]
+      - while:
+          condition: { lt: [idx, name_end] }
+          body:
+            - if:
+                condition: { gt: [repo.len, 0] }
+                then:
+                  - set: [repo, "${repo}/"]
+            - set: [repo, "${repo}${{ call: [parts.get, idx] }}"]
+            - set: [idx, { +: [idx, 1] }]
+      - if:
+          condition: { eq: [{ call: [museum.oci.valid_name, repo] }, 0] }
+          then:
+            - set: [route.kind, 0]
+            - return: [route]
+      - set: [route.repo, repo]
+      - return: [route]
+
+- class:
+    name: Registry
+    members:
+      - [data_dir, string, "./data", { access: public }]
+      # "<event>\t<data json>" for the webhook hub — drained by the caller.
+      - [events, list<string>, null, { access: public }]
+    methods:
+      - def:
+          name: repo_dir
+          args: [[repo, string]]
+          return: string
+          body:
+            - decl: [encoded, string, { call: [repo.replace, "/", "+"] }]
+            - return: ["${<.data_dir}/oci/repos/${encoded}"]
+
+      - def:
+          name: upload_dir
+          return: string
+          body:
+            - return: ["${<.data_dir}/oci/uploads"]
+
+      # OCI error body: {"errors":[{"code","message","detail":{}}]}
+      - def:
+          name: fail
+          args: [[xch, ref<museum.http.Exchange>], [status, i32], [code, string], [message, string]]
+          body:
+            - decl: [code_json, string, { call: [museum.text.json_str, code] }]
+            - decl: [msg_json, string, { call: [museum.text.json_str, message] }]
+            - call: [xch.json, status, "{\"errors\":[{\"code\":${code_json},\"message\":${msg_json},\"detail\":{}}]}"]
+
+      - def:
+          name: blob_exists
+          args: [[hex, string]]
+          return: i32
+          body:
+            - if:
+                condition: { call: [io.exists, { call: [museum.store.blob_path, <.data_dir, hex] }] }
+                then:
+                  - return: [1]
+            - return: [0]
+
+      # ── blobs ────────────────────────────────────────────────────────────
+      - def:
+          name: get_blob
+          args: [[xch, ref<museum.http.Exchange>], [route, museum.oci.Route]]
+          body:
+            - decl: [hex, string, { call: [museum.oci.digest_hex, route.ref] }]
+            - if:
+                condition: { eq: [hex.len, 0] }
+                then:
+                  - call: [<.fail, xch, 400, "DIGEST_INVALID", "unsupported or malformed digest"]
+                  - return: []
+            - if:
+                condition: { eq: [{ call: [<.blob_exists, hex] }, 0] }
+                then:
+                  - call: [<.fail, xch, 404, "BLOB_UNKNOWN", "blob unknown to registry"]
+                  - return: []
+            - call: [xch.set_header, "docker-content-digest", route.ref]
+            - call: [xch.file, { call: [museum.store.blob_path, <.data_dir, hex] }, "application/octet-stream"]
+
+      # Moves the file `src` into the CAS as blob `hex` (or drops it when the
+      # blob is already there).  `src` must already hash to `hex`.
+      - def:
+          name: adopt_file
+          args: [[src, string], [hex, string]]
+          body:
+            - decl: [final_path, string, { call: [museum.store.blob_path, <.data_dir, hex] }]
+            - if:
+                condition: { call: [io.exists, final_path] }
+                then:
+                  - call: [io.remove, src]
+                  - return: []
+            - call: [io.mkdir_all, "${<.data_dir}/cas/${{ call: [hex.substr, 0, 2] }}"]
+            - call: [io.rename, src, final_path]
+
+      - def:
+          name: upload_location
+          args: [[repo, string], [uuid, string]]
+          return: string
+          body:
+            - return: ["/v2/${repo}/blobs/uploads/${uuid}"]
+
+      # Range header value for an upload of `size` bytes ("0-<size-1>").
+      - def:
+          name: upload_range
+          args: [[size, i64]]
+          return: string
+          body:
+            - if:
+                condition: { le: [size, 0] }
+                then:
+                  - return: ["0-0"]
+            - return: ["0-${{ -: [size, 1] }}"]
+
+      # Finalizes upload data in `src` as blob `digest`: verifies, adopts,
+      # answers 201.  `src` is consumed either way.
+      - def:
+          name: commit_blob
+          args: [[xch, ref<museum.http.Exchange>], [repo, string], [src, string], [digest, string]]
+          body:
+            - decl: [hex, string, { call: [museum.oci.digest_hex, digest] }]
+            - if:
+                condition: { eq: [hex.len, 0] }
+                then:
+                  - call: [io.remove, src]
+                  - call: [<.fail, xch, 400, "DIGEST_INVALID", "unsupported or malformed digest"]
+                  - return: []
+            - decl: [actual, string, { call: [hash.sha256_file, src] }]
+            - if:
+                condition: { neq: [actual, hex] }
+                then:
+                  - call: [io.remove, src]
+                  - call: [<.fail, xch, 400, "DIGEST_INVALID", "content does not match digest (sha256:${actual})"]
+                  - return: []
+            - call: [<.adopt_file, src, hex]
+            - call: [xch.set_header, "location", "/v2/${repo}/blobs/${digest}"]
+            - call: [xch.set_header, "docker-content-digest", digest]
+            - call: [xch.empty, 201]
+
+      # POST /v2/<name>/blobs/uploads/  — mount, monolithic (?digest=) or session start.
+      - def:
+          name: start_upload
+          args: [[xch, ref<museum.http.Exchange>], [route, museum.oci.Route]]
+          body:
+            - call: [io.mkdir_all, { call: [<.upload_dir] }]
+            - decl: [mount, string, { call: [xch.query, "mount"] }]
+            - if:
+                condition: { gt: [mount.len, 0] }
+                then:
+                  - decl: [mhex, string, { call: [museum.oci.digest_hex, mount] }]
+                  # One store for all repositories: a known blob mounts into any repository.
+                  - if:
+                      condition: { and: [{ gt: [mhex.len, 0] }, { eq: [{ call: [<.blob_exists, mhex] }, 1] }] }
+                      then:
+                        - call: [xch.set_header, "location", "/v2/${route.repo}/blobs/${mount}"]
+                        - call: [xch.set_header, "docker-content-digest", mount]
+                        - call: [xch.empty, 201]
+                        - return: []
+            - decl: [uuid, string, { call: [math.random_hex, 16] }]
+            - decl: [data_path, string, "${{ call: [<.upload_dir] }}/${uuid}"]
+            - decl: [digest, string, { call: [xch.query, "digest"] }]
+            - if:
+                condition: { gt: [digest.len, 0] }
+                then:
+                  - if:
+                      condition: { neq: [{ call: [xch.body_to_file, data_path] }, 0] }
+                      then:
+                        - call: [<.fail, xch, 500, "UNKNOWN", "could not store upload"]
+                        - return: []
+                  - call: [<.commit_blob, xch, route.repo, data_path, digest]
+                  - return: []
+            - call: [io.write_file, data_path, ""]
+            - call: [io.write_file, "${data_path}.repo", route.repo]
+            - call: [xch.set_header, "location", { call: [<.upload_location, route.repo, uuid] }]
+            - call: [xch.set_header, "docker-upload-uuid", uuid]
+            - call: [xch.set_header, "range", "0-0"]
+            - call: [xch.empty, 202]
+
+      # Session data file for `uuid` in `repo`, or "" (an error was sent).
+      - def:
+          name: session_path
+          args: [[xch, ref<museum.http.Exchange>], [route, museum.oci.Route]]
+          return: string
+          body:
+            - decl: [uuid, string, route.ref]
+            - decl: [hexchars, string, "0123456789abcdef"]
+            - decl: [okchars, i32, 0]
+            - if:
+                condition: { eq: [uuid.len, 32] }
+                then:
+                  - set: [okchars, 1]
+            - decl: [idx, i32, 0]
+            - while:
+                condition: { and: [{ eq: [okchars, 1] }, { lt: [idx, uuid.len] }] }
+                body:
+                  - if:
+                      condition: { lt: [{ call: [hexchars.index_of, { call: [uuid.substr, idx, 1] }] }, 0] }
+                      then:
+                        - set: [okchars, 0]
+                  - set: [idx, { +: [idx, 1] }]
+            - decl: [data_path, string, "${{ call: [<.upload_dir] }}/${uuid}"]
+            - if:
+                condition: { or: [{ eq: [okchars, 0] }, { not: [{ call: [io.exists, "${data_path}.repo"] }] }] }
+                then:
+                  - call: [<.fail, xch, 404, "BLOB_UPLOAD_UNKNOWN", "upload unknown"]
+                  - return: [""]
+            - decl: [owner_repo, string, { call: [io.read_file, "${data_path}.repo"] }]
+            - if:
+                condition: { neq: [owner_repo, route.repo] }
+                then:
+                  - call: [<.fail, xch, 404, "BLOB_UPLOAD_UNKNOWN", "upload unknown"]
+                  - return: [""]
+            - return: [data_path]
+
+      # Appends the request body to the session file.  Returns 0 or -1.
+      - def:
+          name: append_body
+          args: [[xch, ref<museum.http.Exchange>], [data_path, string]]
+          return: i32
+          body:
+            - if:
+                condition: { eq: [{ call: [xch.body_len] }, 0] }
+                then:
+                  - return: [0]
+            - decl: [chunk_path, string, "${data_path}.chunk"]
+            - if:
+                condition: { neq: [{ call: [xch.body_to_file, chunk_path] }, 0] }
+                then:
+                  - return: [-1]
+            - if:
+                condition: { eq: [{ call: [io.file_size, data_path] }, 0] }
+                then:
+                  - call: [io.rename, chunk_path, data_path]
+                  - return: [0]
+            - decl: [appended, i64, { call: [io.append_from, data_path, chunk_path] }]
+            - call: [io.remove, chunk_path]
+            - if:
+                condition: { lt: [appended, 0] }
+                then:
+                  - return: [-1]
+            - return: [0]
+
+      # PATCH: append a chunk.  GET: report progress.  PUT: finalize.  DELETE: cancel.
+      - def:
+          name: patch_upload
+          args: [[xch, ref<museum.http.Exchange>], [route, museum.oci.Route]]
+          body:
+            - decl: [data_path, string, { call: [<.session_path, xch, route] }]
+            - if:
+                condition: { eq: [data_path.len, 0] }
+                then:
+                  - return: []
+            # Content-Range "<start>-<end>" must continue where the upload is.
+            - decl: [crange, string, { call: [xch.header, "content-range"] }]
+            - decl: [have, i64, { call: [io.file_size, data_path] }]
+            - if:
+                condition: { gt: [crange.len, 0] }
+                then:
+                  - decl: [dash, i32, { call: [crange.index_of, "-"] }]
+                  - if:
+                      condition: { gt: [dash, 0] }
+                      then:
+                        - decl: [start_at, i64, { call: [crange.substr, 0, dash] }]
+                        - if:
+                            condition: { neq: [start_at, have] }
+                            then:
+                              - call: [xch.set_header, "range", { call: [<.upload_range, have] }]
+                              - call: [<.fail, xch, 416, "BLOB_UPLOAD_INVALID", "chunk does not continue the upload at ${have}"]
+                              - return: []
+            - if:
+                condition: { neq: [{ call: [<.append_body, xch, data_path] }, 0] }
+                then:
+                  - call: [<.fail, xch, 500, "BLOB_UPLOAD_INVALID", "could not store chunk"]
+                  - return: []
+            - decl: [size, i64, { call: [io.file_size, data_path] }]
+            - call: [xch.set_header, "location", { call: [<.upload_location, route.repo, route.ref] }]
+            - call: [xch.set_header, "docker-upload-uuid", route.ref]
+            - call: [xch.set_header, "range", { call: [<.upload_range, size] }]
+            - call: [xch.empty, 202]
+
+      - def:
+          name: upload_status
+          args: [[xch, ref<museum.http.Exchange>], [route, museum.oci.Route]]
+          body:
+            - decl: [data_path, string, { call: [<.session_path, xch, route] }]
+            - if:
+                condition: { eq: [data_path.len, 0] }
+                then:
+                  - return: []
+            - call: [xch.set_header, "location", { call: [<.upload_location, route.repo, route.ref] }]
+            - call: [xch.set_header, "docker-upload-uuid", route.ref]
+            - call: [xch.set_header, "range", { call: [<.upload_range, { call: [io.file_size, data_path] }] }]
+            - call: [xch.empty, 204]
+
+      - def:
+          name: finish_upload
+          args: [[xch, ref<museum.http.Exchange>], [route, museum.oci.Route]]
+          body:
+            - decl: [data_path, string, { call: [<.session_path, xch, route] }]
+            - if:
+                condition: { eq: [data_path.len, 0] }
+                then:
+                  - return: []
+            - decl: [digest, string, { call: [xch.query, "digest"] }]
+            - if:
+                condition: { eq: [digest.len, 0] }
+                then:
+                  - call: [<.fail, xch, 400, "DIGEST_INVALID", "digest query parameter required"]
+                  - return: []
+            - if:
+                condition: { neq: [{ call: [<.append_body, xch, data_path] }, 0] }
+                then:
+                  - call: [<.fail, xch, 500, "BLOB_UPLOAD_INVALID", "could not store chunk"]
+                  - return: []
+            - call: [io.remove, "${data_path}.repo"]
+            - call: [<.commit_blob, xch, route.repo, data_path, digest]
+
+      - def:
+          name: cancel_upload
+          args: [[xch, ref<museum.http.Exchange>], [route, museum.oci.Route]]
+          body:
+            - decl: [data_path, string, { call: [<.session_path, xch, route] }]
+            - if:
+                condition: { eq: [data_path.len, 0] }
+                then:
+                  - return: []
+            - call: [io.remove, data_path]
+            - call: [io.remove, "${data_path}.repo"]
+            - call: [xch.empty, 204]
+
+      # ── manifests ────────────────────────────────────────────────────────
+      # Digest a reference (tag or digest) points to in `repo`, or "".
+      - def:
+          name: resolve
+          args: [[repo, string], [ref, string]]
+          return: string
+          body:
+            - decl: [dir, string, { call: [<.repo_dir, repo] }]
+            - decl: [hex, string, { call: [museum.oci.digest_hex, ref] }]
+            - if:
+                condition: { gt: [hex.len, 0] }
+                then:
+                  - if:
+                      condition: { call: [io.exists, "${dir}/manifests/${hex}"] }
+                      then:
+                        - return: [ref]
+                  - return: [""]
+            - if:
+                condition: { eq: [{ call: [museum.oci.valid_tag, ref] }, 0] }
+                then:
+                  - return: [""]
+            - return: [{ call: [museum.store.read_text, "${dir}/tags/${ref}"] }]
+
+      - def:
+          name: get_manifest
+          args: [[xch, ref<museum.http.Exchange>], [route, museum.oci.Route]]
+          body:
+            - decl: [digest, string, { call: [<.resolve, route.repo, route.ref] }]
+            - if:
+                condition: { eq: [digest.len, 0] }
+                then:
+                  - call: [<.fail, xch, 404, "MANIFEST_UNKNOWN", "manifest unknown"]
+                  - return: []
+            - decl: [hex, string, { call: [museum.oci.digest_hex, digest] }]
+            - decl: [media, string, { call: [museum.store.read_text, "${{ call: [<.repo_dir, route.repo] }}/manifests/${hex}"] }]
+            - call: [xch.set_header, "docker-content-digest", digest]
+            - call: [xch.file, { call: [museum.store.blob_path, <.data_dir, hex] }, media]
+
+      # Missing blobs referenced by an image manifest (config + layers) or
+      # manifests referenced by an index, as a comma list ("" = all present).
+      - def:
+          name: missing_refs
+          args: [[repo, string], [manifest_path, string]]
+          return: string
+          body:
+            - decl: [missing, string, ""]
+            - decl: [doc, ptr<yaml_doc>, { call: [yaml.parse_file, manifest_path] }]
+            - decl: [root, ptr<yaml_node>, { call: [yaml.root, doc] }]
+            - decl: [config_digest, string, { call: [yaml.scalar, { call: [yaml.get, { call: [yaml.get, root, "config"] }, "digest"] }] }]
+            - if:
+                condition: { gt: [config_digest.len, 0] }
+                then:
+                  - if:
+                      condition: { eq: [{ call: [<.blob_exists, { call: [museum.oci.digest_hex, config_digest] }] }, 0] }
+                      then:
+                        - set: [missing, config_digest]
+            - decl: [layers, ref<yaml_node>, { call: [yaml.get, root, "layers"] }]
+            - decl: [lcount, i32, { call: [yaml.size, layers] }]
+            - decl: [lidx, i32, 0]
+            - while:
+                condition: { lt: [lidx, lcount] }
+                body:
+                  - decl: [ldigest, string, { call: [yaml.scalar, { call: [yaml.get, { call: [yaml.item, layers, lidx] }, "digest"] }] }]
+                  - if:
+                      condition: { eq: [{ call: [<.blob_exists, { call: [museum.oci.digest_hex, ldigest] }] }, 0] }
+                      then:
+                        - set: [missing, "${missing},${ldigest}"]
+                  - set: [lidx, { +: [lidx, 1] }]
+            - decl: [children, ref<yaml_node>, { call: [yaml.get, root, "manifests"] }]
+            - decl: [ccount, i32, { call: [yaml.size, children] }]
+            - decl: [cidx, i32, 0]
+            - while:
+                condition: { lt: [cidx, ccount] }
+                body:
+                  - decl: [cdigest, string, { call: [yaml.scalar, { call: [yaml.get, { call: [yaml.item, children, cidx] }, "digest"] }] }]
+                  - if:
+                      condition: { eq: [{ call: [<.blob_exists, { call: [museum.oci.digest_hex, cdigest] }] }, 0] }
+                      then:
+                        - set: [missing, "${missing},${cdigest}"]
+                  - set: [cidx, { +: [cidx, 1] }]
+            - call: [yaml.free, doc]
+            - return: [missing]
+
+      - def:
+          name: put_manifest
+          args: [[xch, ref<museum.http.Exchange>], [route, museum.oci.Route]]
+          body:
+            - decl: [ref_hex, string, { call: [museum.oci.digest_hex, route.ref] }]
+            - decl: [is_digest, i32, 0]
+            - if:
+                condition: { gt: [ref_hex.len, 0] }
+                then:
+                  - set: [is_digest, 1]
+            - if:
+                condition: { and: [{ eq: [is_digest, 0] }, { eq: [{ call: [museum.oci.valid_tag, route.ref] }, 0] }] }
+                then:
+                  - call: [<.fail, xch, 400, "TAG_INVALID", "invalid tag"]
+                  - return: []
+            - call: [io.mkdir_all, { call: [<.upload_dir] }]
+            - decl: [tmp_path, string, "${{ call: [<.upload_dir] }}/manifest-${{ call: [math.random_hex, 8] }}"]
+            - if:
+                condition: { neq: [{ call: [xch.body_to_file, tmp_path] }, 0] }
+                then:
+                  - call: [<.fail, xch, 500, "UNKNOWN", "could not store manifest"]
+                  - return: []
+            - if:
+                condition: { gt: [{ call: [io.file_size, tmp_path] }, 4194304] }
+                then:
+                  - call: [io.remove, tmp_path]
+                  - call: [<.fail, xch, 413, "SIZE_INVALID", "manifest larger than 4 MiB"]
+                  - return: []
+            - decl: [doc, ptr<yaml_doc>, { call: [yaml.parse_file, tmp_path] }]
+            - decl: [perr, string, { call: [yaml.error, doc] }]
+            - decl: [root, ptr<yaml_node>, { call: [yaml.root, doc] }]
+            - decl: [body_media, string, { call: [yaml.scalar, { call: [yaml.get, root, "mediaType"] }] }]
+            - decl: [artifact, string, { call: [yaml.scalar, { call: [yaml.get, root, "artifactType"] }] }]
+            - if:
+                condition: { eq: [artifact.len, 0] }
+                then:
+                  - set: [artifact, { call: [yaml.scalar, { call: [yaml.get, { call: [yaml.get, root, "config"] }, "mediaType"] }] }]
+            - call: [yaml.free, doc]
+            - if:
+                condition: { gt: [perr.len, 0] }
+                then:
+                  - call: [io.remove, tmp_path]
+                  - call: [<.fail, xch, 400, "MANIFEST_INVALID", "manifest is not valid JSON"]
+                  - return: []
+            # Media type: the request's Content-Type, else the manifest's own.
+            - decl: [media, string, { call: [xch.header, "content-type"] }]
+            - if:
+                condition: { eq: [media.len, 0] }
+                then:
+                  - set: [media, body_media]
+            - if:
+                condition: { eq: [media.len, 0] }
+                then:
+                  - set: [media, "application/vnd.oci.image.manifest.v1+json"]
+            - decl: [missing, string, { call: [<.missing_refs, route.repo, tmp_path] }]
+            - if:
+                condition: { gt: [missing.len, 0] }
+                then:
+                  - call: [io.remove, tmp_path]
+                  - call: [<.fail, xch, 400, "MANIFEST_BLOB_UNKNOWN", "blobs not in registry: ${missing}"]
+                  - return: []
+            - decl: [hex, string, { call: [hash.sha256_file, tmp_path] }]
+            - decl: [digest, string, "sha256:${hex}"]
+            - if:
+                condition: { and: [{ eq: [is_digest, 1] }, { neq: [digest, route.ref] }] }
+                then:
+                  - call: [io.remove, tmp_path]
+                  - call: [<.fail, xch, 400, "DIGEST_INVALID", "manifest is ${digest}"]
+                  - return: []
+            - call: [<.adopt_file, tmp_path, hex]
+            - decl: [dir, string, { call: [<.repo_dir, route.repo] }]
+            - call: [museum.store.write_text, <.data_dir, "${dir}/manifests", hex, media]
+            - decl: [tag, string, ""]
+            - if:
+                condition: { eq: [is_digest, 0] }
+                then:
+                  - set: [tag, route.ref]
+                  - call: [museum.store.write_text, <.data_dir, "${dir}/tags", tag, digest]
+            - decl: [repo_json, string, { call: [museum.text.json_str, route.repo] }]
+            - decl: [tag_json, string, { call: [museum.text.json_str, tag] }]
+            - decl: [media_json, string, { call: [museum.text.json_str, media] }]
+            - decl: [art_json, string, { call: [museum.text.json_str, artifact] }]
+            - call: [<.events.push, "image.pushed\t{\"repository\":${repo_json},\"tag\":${tag_json},\"digest\":\"${digest}\",\"media_type\":${media_json},\"artifact_type\":${art_json}}"]
+            - call: [log.info, "oci PUT ${route.repo}:${route.ref} → ${digest}"]
+            - call: [xch.set_header, "location", "/v2/${route.repo}/manifests/${digest}"]
+            - call: [xch.set_header, "docker-content-digest", digest]
+            - call: [xch.empty, 201]
+
+      # DELETE by digest removes the manifest from the repository (and every
+      # tag pointing at it); DELETE by tag removes only the tag.  The bytes stay
+      # in the CAS (shared store; garbage collection is a separate concern).
+      - def:
+          name: delete_manifest
+          args: [[xch, ref<museum.http.Exchange>], [route, museum.oci.Route]]
+          body:
+            - decl: [dir, string, { call: [<.repo_dir, route.repo] }]
+            - decl: [hex, string, { call: [museum.oci.digest_hex, route.ref] }]
+            - if:
+                condition: { eq: [hex.len, 0] }
+                then:
+                  - if:
+                      condition: { or: [{ eq: [{ call: [museum.oci.valid_tag, route.ref] }, 0] }, { not: [{ call: [io.exists, "${dir}/tags/${route.ref}"] }] }] }
+                      then:
+                        - call: [<.fail, xch, 404, "MANIFEST_UNKNOWN", "manifest unknown"]
+                        - return: []
+                  - call: [io.remove, "${dir}/tags/${route.ref}"]
+                  - call: [xch.empty, 202]
+                  - return: []
+            - if:
+                condition: { not: [{ call: [io.exists, "${dir}/manifests/${hex}"] }] }
+                then:
+                  - call: [<.fail, xch, 404, "MANIFEST_UNKNOWN", "manifest unknown"]
+                  - return: []
+            - call: [io.remove, "${dir}/manifests/${hex}"]
+            - decl: [tags, list<string>, { call: [museum.store.list_files, "${dir}/tags"] }]
+            - decl: [tidx, i32, 0]
+            - while:
+                condition: { lt: [tidx, tags.len] }
+                body:
+                  - decl: [tag, string, { call: [tags.get, tidx] }]
+                  - if:
+                      condition: { eq: [{ call: [museum.store.read_text, "${dir}/tags/${tag}"] }, route.ref] }
+                      then:
+                        - call: [io.remove, "${dir}/tags/${tag}"]
+                  - set: [tidx, { +: [tidx, 1] }]
+            - call: [xch.empty, 202]
+
+      # ── listings ─────────────────────────────────────────────────────────
+      # `items` sorted; returns the page after `last` with at most `limit`
+      # entries (limit <= 0 = all) as a JSON array, and sets a Link header
+      # when there is more.
+      - def:
+          name: page_json
+          args: [[xch, ref<museum.http.Exchange>], [items, list<string>], [link_base, string]]
+          return: string
+          body:
+            - decl: [last, string, { call: [xch.query, "last"] }]
+            - decl: [limit_text, string, { call: [xch.query, "n"] }]
+            - decl: [limit, i32, 0]
+            - if:
+                condition: { gt: [limit_text.len, 0] }
+                then:
+                  - set: [limit, limit_text]
+            - decl: [page, list<string>]
+            - decl: [more, i32, 0]
+            - decl: [idx, i32, 0]
+            - while:
+                condition: { lt: [idx, items.len] }
+                body:
+                  - decl: [item, string, { call: [items.get, idx] }]
+                  - if:
+                      condition: { or: [{ eq: [last.len, 0] }, { gt: [item, last] }] }
+                      then:
+                        - if:
+                            condition: { and: [{ gt: [limit, 0] }, { ge: [page.len, limit] }] }
+                            then:
+                              - set: [more, 1]
+                            else:
+                              - call: [page.push, item]
+                  - set: [idx, { +: [idx, 1] }]
+            - if:
+                condition: { and: [{ eq: [more, 1] }, { gt: [page.len, 0] }] }
+                then:
+                  - decl: [tail, string, { call: [page.get, { -: [page.len, 1] }] }]
+                  - call: [xch.set_header, "link", "<${link_base}?n=${limit}&last=${tail}>; rel=\"next\""]
+            - return: [{ call: [museum.text.json_list, page] }]
+
+      - def:
+          name: list_tags
+          args: [[xch, ref<museum.http.Exchange>], [route, museum.oci.Route]]
+          body:
+            - decl: [dir, string, { call: [<.repo_dir, route.repo] }]
+            - if:
+                condition: { not: [{ call: [io.is_dir, dir] }] }
+                then:
+                  - call: [<.fail, xch, 404, "NAME_UNKNOWN", "repository name not known to registry"]
+                  - return: []
+            - decl: [tags, list<string>, { call: [museum.store.list_files, "${dir}/tags"] }]
+            - decl: [page, string, { call: [<.page_json, xch, tags, "/v2/${route.repo}/tags/list"] }]
+            - call: [xch.json, 200, "{\"name\":${{ call: [museum.text.json_str, route.repo] }},\"tags\":${page}}"]
+
+      - def:
+          name: repositories
+          return: list<string>
+          body:
+            - decl: [dirs, list<string>, { call: [museum.store.list_subdirs, "${<.data_dir}/oci/repos"] }]
+            - decl: [out, list<string>]
+            - decl: [idx, i32, 0]
+            - while:
+                condition: { lt: [idx, dirs.len] }
+                body:
+                  - decl: [enc, string, { call: [dirs.get, idx] }]
+                  - call: [out.push, { call: [enc.replace, "+", "/"] }]
+                  - set: [idx, { +: [idx, 1] }]
+            - call: [out.sort]
+            - return: [out]
+
+      - def:
+          name: catalog
+          args: [[xch, ref<museum.http.Exchange>]]
+          body:
+            - decl: [repos, list<string>, { call: [<.repositories] }]
+            - decl: [page, string, { call: [<.page_json, xch, repos, "/v2/_catalog"] }]
+            - call: [xch.json, 200, "{\"repositories\":${page}}"]
