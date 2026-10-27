@@ -137,3 +137,15 @@ HTTP Basic auth (`docker login`).
 | cosmos | `/api/v1/…` via `cosmos-api` (HTTP gateway to `cosmosd` RPCs) | Bearer (cosmos session or API token) |
 
 Errors are JSON `{"error": "...", "code": "..."}` with a meaningful HTTP status.
+Exception: museum's `/v2/` registry answers with the OCI error format
+`{"errors":[{"code","message"}]}` that OCI clients expect.
+
+museum's endpoints (implemented, see museum README): `/api/v1/whoami`,
+`/api/v1/tokens` (POST/GET, DELETE `/<id>`), `/api/v1/users` (admin),
+`/api/v1/webhooks` (POST/GET, DELETE `/<id>`, POST `/<id>/test`,
+GET `/<id>/deliveries`, POST `/<id>/deliveries/<delivery>/redeliver`),
+`/api/v1/layers/<pipeline>[/<run>]`, `/api/v1/graph`, `/api/v1/impact`,
+`/api/v1/health`, plus `/api/v1/generic/…` and `/api/v1/exodus/…` aliases of
+the repository paths.  Rights: `read`, `write`, `delete`, `admin`,
+`webhook_admin`; anonymous requests get the role `reader` by default
+(`auth.anonymous` in `museum.yaml`).
