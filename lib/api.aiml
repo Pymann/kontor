@@ -1,9 +1,12 @@
-# museum.api — the repository endpoints. Route handlers in museum.aiml wrap
-# each request in a museum.http.Exchange and call the matching method here.
+# museum.api — the endpoints.  Route handlers in museum.aiml wrap each request
+# in a museum.http.Exchange and call the matching method here.
 #
 # Ownership (aiml memV3, spec/61): endpoints borrow the exchange (`ref<…>`) and
 # read the graph snapshot through a borrow; only reload_graph moves a fresh
 # graph into `<.graph`.
+#
+# Every endpoint authorizes first (`authorize`): read / write / delete / admin /
+# webhook_admin, see museum.auth and doc/ecosystem.md §6.
 
 - namespace: museum.api
 
@@ -11,13 +14,53 @@
 - import: "store.aiml"
 - import: "graph.aiml"
 - import: "exchange.aiml"
+- import: "auth.aiml"
+- import: "oci.aiml"
+- import: "hooks.aiml"
+
+# Media types of a cosmos run-layers artifact (contract §3).
+- def:
+    name: run_layers_type
+    return: string
+    body:
+      - return: ["application/vnd.cosmos.run-layers.v1+json"]
 
 - class:
     name: RepositoryApi
     members:
       - [data_dir, string, "./data", { access: public }]
       - [graph, ptr<museum.graph.DependencyGraph>, null, { access: public }]
+      - [acl, ptr<museum.auth.AccessControl>, null, { access: public }]
+      - [registry, ptr<museum.oci.Registry>, null, { access: public }]
+      - [hooks, ptr<museum.hooks.WebhookHub>, null, { access: public }]
     methods:
+      # Creates the components for `data_dir` and reads <data>/museum.yaml.
+      # Returns "" or a configuration error.
+      - def:
+          name: setup
+          args: [[data_dir, string], [public_url, string]]
+          return: string
+          body:
+            - set: [<.data_dir, data_dir]
+            - decl: [acl_new, ptr<museum.auth.AccessControl>, { new: museum.auth.AccessControl }]
+            - set: [acl_new.data_dir, data_dir]
+            - decl: [loaded, i32, { call: [acl_new.load_config, "${data_dir}/museum.yaml"] }]
+            - decl: [problem, string, acl_new.config_error]
+            - set: [<.acl, acl_new]
+            - decl: [reg_new, ptr<museum.oci.Registry>, { new: museum.oci.Registry }]
+            - set: [reg_new.data_dir, data_dir]
+            - set: [<.registry, reg_new]
+            - decl: [hub_new, ptr<museum.hooks.WebhookHub>, { new: museum.hooks.WebhookHub }]
+            - set: [hub_new.data_dir, data_dir]
+            - set: [hub_new.public_url, public_url]
+            - set: [<.hooks, hub_new]
+            - call: [<.reload_graph]
+            - if:
+                condition: { eq: [loaded, 0] }
+                then:
+                  - return: [problem]
+            - return: [""]
+
       # Rebuilds the dependency graph snapshot from the stored manifests.
       - def:
           name: reload_graph
@@ -26,16 +69,80 @@
             - call: [fresh.load, <.data_dir]
             - set: [<.graph, fresh]
 
+      # ── authorization ──────────────────────────────────────────────────────
+      # The principal of the request when it may perform `action`; otherwise
+      # an error was sent and the result has valid=0.  No or bad credentials
+      # → 401 with a Basic challenge (docker/skopeo then send credentials);
+      # valid credentials without the right → 403.  `oci` selects the OCI
+      # error body format.
+      - def:
+          name: authorize_as
+          args: [[xch, ref<museum.http.Exchange>], [action, string], [oci, i32]]
+          return: museum.auth.Principal
+          body:
+            - decl: [who, museum.auth.Principal, { call: [<.acl.authenticate, { call: [xch.header, "authorization"] }] }]
+            - if:
+                condition: { and: [{ eq: [who.valid, 1] }, { eq: [{ call: [<.acl.allows, who.roles, action] }, 1] }] }
+                then:
+                  - return: [who]
+            - decl: [status, i32, 403]
+            - decl: [code, string, "DENIED"]
+            - decl: [message, string, "requires the '${action}' right"]
+            - if:
+                condition: { or: [{ eq: [who.valid, 0] }, { eq: [who.kind, "anonymous"] }] }
+                then:
+                  - set: [status, 401]
+                  - set: [code, "UNAUTHORIZED"]
+                  - set: [message, "authentication required"]
+                  - call: [xch.set_header, "www-authenticate", "Basic realm=\"museum\""]
+            - if:
+                condition: { eq: [oci, 1] }
+                then:
+                  - call: [<.registry.fail, xch, status, code, message]
+                else:
+                  - call: [xch.error, status, message]
+            - decl: [denied, museum.auth.Principal]
+            - return: [denied]
+
+      - def:
+          name: authorize
+          args: [[xch, ref<museum.http.Exchange>], [action, string]]
+          return: museum.auth.Principal
+          body:
+            - return: [{ call: [<.authorize_as, xch, action, 0] }]
+
+      # Publishes the registry's pending events to the webhook hub.
+      - def:
+          name: flush_registry_events
+          body:
+            - decl: [idx, i32, 0]
+            - while:
+                condition: { lt: [idx, <.registry.events.len] }
+                body:
+                  - decl: [entry, string, { call: [<.registry.events.get, idx] }]
+                  - decl: [tab, i32, { call: [entry.index_of, "\t"] }]
+                  - if:
+                      condition: { gt: [tab, 0] }
+                      then:
+                        - call: [<.hooks.emit, { call: [entry.substr, 0, tab] }, { call: [entry.substr, { +: [tab, 1] }] }]
+                  - set: [idx, { +: [idx, 1] }]
+            - call: [<.registry.events.clear]
+
       # ── generic repository ─────────────────────────────────────────────────
 
-      # Artifact path below /generic/, or "" (an error was sent).
+      # Artifact path below /generic/ (or /api/v1/generic/), or "" (an error was sent).
       - def:
           name: generic_path
           args: [[xch, ref<museum.http.Exchange>]]
           return: string
           body:
             - decl: [full, string, { call: [xch.path] }]
-            - decl: [rel, string, { call: [full.substr, 9] }]
+            - decl: [cut, i32, 9]
+            - if:
+                condition: { eq: [{ call: [full.starts_with, "/api/v1/generic/"] }, 1] }
+                then:
+                  - set: [cut, 16]
+            - decl: [rel, string, { call: [full.substr, cut] }]
             - if:
                 condition: { eq: [{ call: [museum.text.safe_rel_path, rel] }, 0] }
                 then:
@@ -43,37 +150,54 @@
                   - return: [""]
             - return: [rel]
 
+      # Stores the request body as a blob (streamed via a temp file).  Returns
+      # the sha256 or "" (an error was sent).  Checks X-Checksum-Sha256.
       - def:
-          name: generic_put
+          name: store_body
           args: [[xch, ref<museum.http.Exchange>]]
+          return: string
           body:
-            - decl: [rel, string, { call: [<.generic_path, xch] }]
+            - decl: [tmp, string, { call: [museum.store.temp_path, <.data_dir, "upload"] }]
             - if:
-                condition: { eq: [rel.len, 0] }
+                condition: { neq: [{ call: [xch.body_to_file, tmp] }, 0] }
                 then:
-                  - return: []
-            - decl: [inreq, http_request_handle, xch.req]
-            - decl: [payload, buffer<u8>]
-            - set: [payload, inreq.body_bytes]
-            - decl: [size, i32, payload.len]
-            - decl: [digest, string, { call: [hash.sha256, payload] }]
-            # Optional end-to-end integrity check, as other repositories offer.
+                  - call: [xch.error, 500, "could not store upload"]
+                  - return: [""]
             - decl: [expected, string, { call: [xch.header, "x-checksum-sha256"] }]
             - if:
-                condition: { and: [{ gt: [expected.len, 0] }, { neq: [{ call: [expected.lower] }, digest] }] }
+                condition: { gt: [expected.len, 0] }
                 then:
-                  - call: [xch.error, 400, "checksum mismatch: body sha256 is ${digest}"]
-                  - return: []
-            - decl: [stored, string, { call: [museum.store.put_blob, <.data_dir, payload] }]
+                  - decl: [actual, string, { call: [hash.sha256_file, tmp] }]
+                  - if:
+                      condition: { neq: [{ call: [expected.lower] }, actual] }
+                      then:
+                        - call: [io.remove, tmp]
+                        - call: [xch.error, 400, "checksum mismatch: body sha256 is ${actual}"]
+                        - return: [""]
+            - decl: [stored, string, { call: [museum.store.put_blob_file, <.data_dir, tmp] }]
             - if:
                 condition: { eq: [stored.len, 0] }
                 then:
                   - call: [xch.error, 500, "could not store blob"]
-                  - return: []
+            - return: [stored]
+
+      - def:
+          name: generic_put
+          args: [[xch, ref<museum.http.Exchange>]]
+          body:
+            - decl: [who, museum.auth.Principal, { call: [<.authorize, xch, "write"] }]
+            - if: { condition: { eq: [who.valid, 0] }, then: [{ return: [] }] }
+            - decl: [rel, string, { call: [<.generic_path, xch] }]
+            - if: { condition: { eq: [rel.len, 0] }, then: [{ return: [] }] }
+            - decl: [size, i64, { call: [xch.body_len] }]
+            - decl: [stored, string, { call: [<.store_body, xch] }]
+            - if: { condition: { eq: [stored.len, 0] }, then: [{ return: [] }] }
             - call: [museum.store.write_text, <.data_dir, "${<.data_dir}/generic/${rel}", "blob.sha256", stored]
-            - call: [log.info, "generic PUT ${rel} (${size} bytes, ${stored})"]
+            - call: [log.info, "generic PUT ${rel} (${size} bytes, ${stored}) by ${who.name}"]
             - decl: [rel_json, string, { call: [museum.text.json_str, rel] }]
-            - call: [xch.json, 201, "{\"path\":${rel_json},\"sha256\":\"${stored}\",\"size\":${size}}"]
+            - decl: [data, string, "{\"path\":${rel_json},\"sha256\":\"${stored}\",\"size\":${size}}"]
+            - call: [<.hooks.emit, "artifact.published", data]
+            - call: [xch.json, 201, data]
 
       - def:
           name: send_blob
@@ -92,11 +216,10 @@
           name: generic_get
           args: [[xch, ref<museum.http.Exchange>]]
           body:
+            - decl: [who, museum.auth.Principal, { call: [<.authorize, xch, "read"] }]
+            - if: { condition: { eq: [who.valid, 0] }, then: [{ return: [] }] }
             - decl: [rel, string, { call: [<.generic_path, xch] }]
-            - if:
-                condition: { eq: [rel.len, 0] }
-                then:
-                  - return: []
+            - if: { condition: { eq: [rel.len, 0] }, then: [{ return: [] }] }
             - decl: [digest, string, { call: [museum.store.read_text, "${<.data_dir}/generic/${rel}/blob.sha256"] }]
             - if:
                 condition: { eq: [digest.len, 0] }
@@ -128,11 +251,10 @@
           name: manifest_put
           args: [[xch, ref<museum.http.Exchange>]]
           body:
+            - decl: [who, museum.auth.Principal, { call: [<.authorize, xch, "write"] }]
+            - if: { condition: { eq: [who.valid, 0] }, then: [{ return: [] }] }
             - decl: [dir, string, { call: [<.project_dir, xch] }]
-            - if:
-                condition: { eq: [dir.len, 0] }
-                then:
-                  - return: []
+            - if: { condition: { eq: [dir.len, 0] }, then: [{ return: [] }] }
             - decl: [name, string, { call: [xch.param, "name"] }]
             - decl: [version, string, { call: [xch.param, "version"] }]
             - decl: [text, string, { call: [xch.text] }]
@@ -154,6 +276,8 @@
             - decl: [m_version, string, { call: [yaml.scalar, { call: [yaml.get, root, "version"] }] }]
             - decl: [dep_count, i32, { call: [yaml.size, { call: [yaml.get, root, "dependencies"] }] }]
             - decl: [apt_count, i32, { call: [yaml.size, { call: [yaml.get, root, "apt_packages"] }] }]
+            - decl: [deps_json, string, { call: [museum.graph.edges_json, { call: [museum.graph.edge_lines, { call: [yaml.get, root, "dependencies"] }] }] }]
+            - decl: [apt_json, string, { call: [museum.graph.edges_json, { call: [museum.graph.edge_lines, { call: [yaml.get, root, "apt_packages"] }] }] }]
             - call: [yaml.free, doc]
             - if:
                 condition: { or: [{ neq: [m_name, name] }, { neq: [m_version, version] }] }
@@ -162,20 +286,20 @@
                   - return: []
             - call: [museum.store.write_text, <.data_dir, dir, "exodus.json", text]
             - call: [<.reload_graph]
-            - call: [log.info, "exodus manifest ${name}@${version} (${dep_count} deps, ${apt_count} apt)"]
+            - call: [log.info, "exodus manifest ${name}@${version} (${dep_count} deps, ${apt_count} apt) by ${who.name}"]
             - decl: [name_json, string, { call: [museum.text.json_str, name] }]
             - decl: [ver_json, string, { call: [museum.text.json_str, version] }]
+            - call: [<.hooks.emit, "manifest.published", "{\"name\":${name_json},\"version\":${ver_json},\"dependencies\":${deps_json},\"apt_packages\":${apt_json}}"]
             - call: [xch.json, 201, "{\"name\":${name_json},\"version\":${ver_json},\"dependencies\":${dep_count},\"apt_packages\":${apt_count}}"]
 
       - def:
           name: manifest_get
           args: [[xch, ref<museum.http.Exchange>]]
           body:
+            - decl: [who, museum.auth.Principal, { call: [<.authorize, xch, "read"] }]
+            - if: { condition: { eq: [who.valid, 0] }, then: [{ return: [] }] }
             - decl: [dir, string, { call: [<.project_dir, xch] }]
-            - if:
-                condition: { eq: [dir.len, 0] }
-                then:
-                  - return: []
+            - if: { condition: { eq: [dir.len, 0] }, then: [{ return: [] }] }
             - if:
                 condition: { not: [{ call: [io.exists, "${dir}/exodus.json"] }] }
                 then:
@@ -189,11 +313,10 @@
           name: package_put
           args: [[xch, ref<museum.http.Exchange>]]
           body:
+            - decl: [who, museum.auth.Principal, { call: [<.authorize, xch, "write"] }]
+            - if: { condition: { eq: [who.valid, 0] }, then: [{ return: [] }] }
             - decl: [dir, string, { call: [<.project_dir, xch] }]
-            - if:
-                condition: { eq: [dir.len, 0] }
-                then:
-                  - return: []
+            - if: { condition: { eq: [dir.len, 0] }, then: [{ return: [] }] }
             - decl: [name, string, { call: [xch.param, "name"] }]
             - decl: [version, string, { call: [xch.param, "version"] }]
             - if:
@@ -201,16 +324,9 @@
                 then:
                   - call: [xch.error, 409, "upload exodus.json for ${name}@${version} first"]
                   - return: []
-            - decl: [inreq, http_request_handle, xch.req]
-            - decl: [payload, buffer<u8>]
-            - set: [payload, inreq.body_bytes]
-            - decl: [size, i32, payload.len]
-            - decl: [digest, string, { call: [museum.store.put_blob, <.data_dir, payload] }]
-            - if:
-                condition: { eq: [digest.len, 0] }
-                then:
-                  - call: [xch.error, 500, "could not store blob"]
-                  - return: []
+            - decl: [size, i64, { call: [xch.body_len] }]
+            - decl: [digest, string, { call: [<.store_body, xch] }]
+            - if: { condition: { eq: [digest.len, 0] }, then: [{ return: [] }] }
             - call: [museum.store.write_text, <.data_dir, dir, "package.sha256", digest]
             - decl: [previous, string, { call: [museum.graph.previous_package_digest, <.data_dir, name, version] }]
             - decl: [unchanged, string, "false"]
@@ -222,20 +338,21 @@
                 else:
                   - decl: [snapshot, ref<museum.graph.DependencyGraph>, <.graph]
                   - set: [impact, { call: [snapshot.impact_json, "project", name, version] }]
-            - call: [log.info, "exodus package ${name}@${version} (${size} bytes, unchanged=${unchanged})"]
+            - call: [log.info, "exodus package ${name}@${version} (${size} bytes, unchanged=${unchanged}) by ${who.name}"]
             - decl: [name_json, string, { call: [museum.text.json_str, name] }]
             - decl: [ver_json, string, { call: [museum.text.json_str, version] }]
-            - call: [xch.json, 201, "{\"name\":${name_json},\"version\":${ver_json},\"sha256\":\"${digest}\",\"size\":${size},\"unchanged\":${unchanged},\"impact\":${impact}}"]
+            - decl: [data, string, "{\"name\":${name_json},\"version\":${ver_json},\"sha256\":\"${digest}\",\"size\":${size},\"unchanged\":${unchanged},\"impact\":${impact}}"]
+            - call: [<.hooks.emit, "package.published", data]
+            - call: [xch.json, 201, data]
 
       - def:
           name: package_get
           args: [[xch, ref<museum.http.Exchange>]]
           body:
+            - decl: [who, museum.auth.Principal, { call: [<.authorize, xch, "read"] }]
+            - if: { condition: { eq: [who.valid, 0] }, then: [{ return: [] }] }
             - decl: [dir, string, { call: [<.project_dir, xch] }]
-            - if:
-                condition: { eq: [dir.len, 0] }
-                then:
-                  - return: []
+            - if: { condition: { eq: [dir.len, 0] }, then: [{ return: [] }] }
             - decl: [digest, string, { call: [museum.store.read_text, "${dir}/package.sha256"] }]
             - if:
                 condition: { eq: [digest.len, 0] }
@@ -250,6 +367,8 @@
           name: graph_view
           args: [[xch, ref<museum.http.Exchange>]]
           body:
+            - decl: [who, museum.auth.Principal, { call: [<.authorize, xch, "read"] }]
+            - if: { condition: { eq: [who.valid, 0] }, then: [{ return: [] }] }
             - decl: [snapshot, ref<museum.graph.DependencyGraph>, <.graph]
             - call: [xch.json, 200, { call: [snapshot.graph_json] }]
 
@@ -257,6 +376,8 @@
           name: impact
           args: [[xch, ref<museum.http.Exchange>]]
           body:
+            - decl: [who, museum.auth.Principal, { call: [<.authorize, xch, "read"] }]
+            - if: { condition: { eq: [who.valid, 0] }, then: [{ return: [] }] }
             - decl: [project, string, { call: [xch.query, "project"] }]
             - decl: [apt, string, { call: [xch.query, "apt"] }]
             - decl: [version, string, { call: [xch.query, "version"] }]
@@ -278,3 +399,483 @@
           args: [[xch, ref<museum.http.Exchange>]]
           body:
             - call: [xch.json, 200, "{\"status\":\"ok\"}"]
+
+      # ── identity: whoami, tokens, users ────────────────────────────────────
+
+      - def:
+          name: whoami
+          args: [[xch, ref<museum.http.Exchange>]]
+          body:
+            - decl: [who, museum.auth.Principal, { call: [<.acl.authenticate, { call: [xch.header, "authorization"] }] }]
+            - if:
+                condition: { eq: [who.valid, 0] }
+                then:
+                  - call: [xch.set_header, "www-authenticate", "Basic realm=\"museum\""]
+                  - call: [xch.error, 401, "authentication required"]
+                  - return: []
+            - call: [xch.json, 200, "{\"name\":${{ call: [museum.text.json_str, who.name] }},\"kind\":\"${who.kind}\",\"roles\":${{ call: [museum.auth.csv_json, who.roles] }}}"]
+
+      # Body field as comma list: JSON array or comma string.
+      - def:
+          name: body_csv
+          args: [[root, ref<yaml_node>], [key, string]]
+          return: string
+          body:
+            - decl: [node, ref<yaml_node>, { call: [yaml.get, root, key] }]
+            - if:
+                condition: { eq: [{ call: [yaml.kind, node] }, yaml.sequence] }
+                then:
+                  - return: [{ call: [museum.auth.seq_csv, node] }]
+            - return: [{ call: [yaml.scalar, node] }]
+
+      # POST /api/v1/tokens {label, roles, owner?} → the secret, shown once.
+      # Anyone authenticated may mint tokens for themselves within their own
+      # rights; minting for another owner needs admin.
+      - def:
+          name: token_create
+          args: [[xch, ref<museum.http.Exchange>]]
+          body:
+            - decl: [who, museum.auth.Principal, { call: [<.acl.authenticate, { call: [xch.header, "authorization"] }] }]
+            - if:
+                condition: { or: [{ eq: [who.valid, 0] }, { eq: [who.kind, "anonymous"] }] }
+                then:
+                  - call: [xch.set_header, "www-authenticate", "Basic realm=\"museum\""]
+                  - call: [xch.error, 401, "authentication required"]
+                  - return: []
+            - decl: [doc, ptr<yaml_doc>, { call: [yaml.parse, { call: [xch.text] }] }]
+            - decl: [root, ptr<yaml_node>, { call: [yaml.root, doc] }]
+            - decl: [label, string, { call: [yaml.scalar, { call: [yaml.get, root, "label"] }] }]
+            - decl: [owner, string, { call: [yaml.scalar, { call: [yaml.get, root, "owner"] }] }]
+            - decl: [roles_csv, string, { call: [<.body_csv, root, "roles"] }]
+            - call: [yaml.free, doc]
+            - if: { condition: { eq: [owner.len, 0] }, then: [{ set: [owner, who.name] }] }
+            - if:
+                condition: { eq: [{ call: [museum.auth.valid_name, owner] }, 0] }
+                then:
+                  - call: [xch.error, 400, "invalid owner"]
+                  - return: []
+            - if:
+                condition: { and: [{ neq: [owner, who.name] }, { eq: [{ call: [<.acl.allows, who.roles, "admin"] }, 0] }] }
+                then:
+                  - call: [xch.error, 403, "minting tokens for another owner requires admin"]
+                  - return: []
+            - if:
+                condition: { eq: [{ call: [<.acl.known_roles, roles_csv] }, 0] }
+                then:
+                  - call: [xch.error, 400, "roles must name existing roles"]
+                  - return: []
+            - if:
+                condition: { eq: [{ call: [<.acl.roles_within, roles_csv, who.roles] }, 0] }
+                then:
+                  - call: [xch.error, 403, "a token cannot carry rights its creator does not have"]
+                  - return: []
+            - decl: [minted, string, { call: [<.acl.create_token, owner, label, roles_csv] }]
+            - decl: [colon, i32, { call: [minted.index_of, ":"] }]
+            - decl: [tok_id, string, { call: [minted.substr, 0, colon] }]
+            - decl: [secret, string, { call: [minted.substr, { +: [colon, 1] }] }]
+            - call: [xch.json, 201, "{\"id\":\"${tok_id}\",\"owner\":${{ call: [museum.text.json_str, owner] }},\"roles\":${{ call: [museum.auth.csv_json, roles_csv] }},\"token\":\"${secret}\"}"]
+
+      - def:
+          name: token_list
+          args: [[xch, ref<museum.http.Exchange>]]
+          body:
+            - decl: [who, museum.auth.Principal, { call: [<.acl.authenticate, { call: [xch.header, "authorization"] }] }]
+            - if:
+                condition: { or: [{ eq: [who.valid, 0] }, { eq: [who.kind, "anonymous"] }] }
+                then:
+                  - call: [xch.set_header, "www-authenticate", "Basic realm=\"museum\""]
+                  - call: [xch.error, 401, "authentication required"]
+                  - return: []
+            - decl: [filter, string, who.name]
+            - if: { condition: { eq: [{ call: [<.acl.allows, who.roles, "admin"] }, 1] }, then: [{ set: [filter, ""] }] }
+            - decl: [listing, string, { call: [<.acl.tokens_json, filter] }]
+            - call: [xch.json, 200, "{\"tokens\":${listing}}"]
+
+      - def:
+          name: token_revoke
+          args: [[xch, ref<museum.http.Exchange>]]
+          body:
+            - decl: [who, museum.auth.Principal, { call: [<.acl.authenticate, { call: [xch.header, "authorization"] }] }]
+            - if:
+                condition: { or: [{ eq: [who.valid, 0] }, { eq: [who.kind, "anonymous"] }] }
+                then:
+                  - call: [xch.set_header, "www-authenticate", "Basic realm=\"museum\""]
+                  - call: [xch.error, 401, "authentication required"]
+                  - return: []
+            - decl: [owner, string, who.name]
+            - if: { condition: { eq: [{ call: [<.acl.allows, who.roles, "admin"] }, 1] }, then: [{ set: [owner, ""] }] }
+            - if:
+                condition: { eq: [{ call: [<.acl.revoke_token, { call: [xch.param, "id"] }, owner] }, 0] }
+                then:
+                  - call: [xch.error, 404, "no such token"]
+                  - return: []
+            - call: [xch.empty, 204]
+
+      - def:
+          name: user_put
+          args: [[xch, ref<museum.http.Exchange>]]
+          body:
+            - decl: [who, museum.auth.Principal, { call: [<.authorize, xch, "admin"] }]
+            - if: { condition: { eq: [who.valid, 0] }, then: [{ return: [] }] }
+            - decl: [doc, ptr<yaml_doc>, { call: [yaml.parse, { call: [xch.text] }] }]
+            - decl: [root, ptr<yaml_node>, { call: [yaml.root, doc] }]
+            - decl: [name, string, { call: [yaml.scalar, { call: [yaml.get, root, "name"] }] }]
+            - decl: [password, string, { call: [yaml.scalar, { call: [yaml.get, root, "password"] }] }]
+            - decl: [roles_csv, string, { call: [<.body_csv, root, "roles"] }]
+            - call: [yaml.free, doc]
+            - decl: [problem, string, { call: [<.acl.put_user, name, password, roles_csv] }]
+            - if:
+                condition: { gt: [problem.len, 0] }
+                then:
+                  - call: [xch.error, 400, problem]
+                  - return: []
+            - call: [xch.json, 201, "{\"name\":${{ call: [museum.text.json_str, name] }},\"roles\":${{ call: [museum.auth.csv_json, roles_csv] }}}"]
+
+      - def:
+          name: user_list
+          args: [[xch, ref<museum.http.Exchange>]]
+          body:
+            - decl: [who, museum.auth.Principal, { call: [<.authorize, xch, "admin"] }]
+            - if: { condition: { eq: [who.valid, 0] }, then: [{ return: [] }] }
+            - decl: [listing, string, { call: [<.acl.users_json] }]
+            - call: [xch.json, 200, "{\"users\":${listing}}"]
+
+      - def:
+          name: user_delete
+          args: [[xch, ref<museum.http.Exchange>]]
+          body:
+            - decl: [who, museum.auth.Principal, { call: [<.authorize, xch, "admin"] }]
+            - if: { condition: { eq: [who.valid, 0] }, then: [{ return: [] }] }
+            - if:
+                condition: { eq: [{ call: [<.acl.delete_user, { call: [xch.param, "name"] }] }, 0] }
+                then:
+                  - call: [xch.error, 404, "no such user"]
+                  - return: []
+            - call: [xch.empty, 204]
+
+      # ── webhooks ───────────────────────────────────────────────────────────
+
+      - def:
+          name: hook_create
+          args: [[xch, ref<museum.http.Exchange>]]
+          body:
+            - decl: [who, museum.auth.Principal, { call: [<.authorize, xch, "webhook_admin"] }]
+            - if: { condition: { eq: [who.valid, 0] }, then: [{ return: [] }] }
+            - decl: [doc, ptr<yaml_doc>, { call: [yaml.parse, { call: [xch.text] }] }]
+            - decl: [root, ptr<yaml_node>, { call: [yaml.root, doc] }]
+            - decl: [target, string, { call: [yaml.scalar, { call: [yaml.get, root, "url"] }] }]
+            - decl: [secret, string, { call: [yaml.scalar, { call: [yaml.get, root, "secret"] }] }]
+            - decl: [events_csv, string, { call: [<.body_csv, root, "events"] }]
+            - call: [yaml.free, doc]
+            - decl: [sub_id, string, { call: [<.hooks.subscribe, target, secret, events_csv] }]
+            - if:
+                condition: { eq: [{ call: [sub_id.starts_with, "!"] }, 1] }
+                then:
+                  - call: [xch.error, 400, { call: [sub_id.substr, 1] }]
+                  - return: []
+            - call: [<.hooks.enqueue_one, sub_id, "ping", "{}"]
+            - if: { condition: { eq: [events_csv.len, 0] }, then: [{ set: [events_csv, "*"] }] }
+            - call: [xch.json, 201, "{\"id\":\"${sub_id}\",\"url\":${{ call: [museum.text.json_str, target] }},\"events\":${{ call: [museum.auth.csv_json, events_csv] }}}"]
+
+      - def:
+          name: hook_list
+          args: [[xch, ref<museum.http.Exchange>]]
+          body:
+            - decl: [who, museum.auth.Principal, { call: [<.authorize, xch, "webhook_admin"] }]
+            - if: { condition: { eq: [who.valid, 0] }, then: [{ return: [] }] }
+            - decl: [listing, string, { call: [<.hooks.subs_json] }]
+            - call: [xch.json, 200, "{\"webhooks\":${listing}}"]
+
+      - def:
+          name: hook_delete
+          args: [[xch, ref<museum.http.Exchange>]]
+          body:
+            - decl: [who, museum.auth.Principal, { call: [<.authorize, xch, "webhook_admin"] }]
+            - if: { condition: { eq: [who.valid, 0] }, then: [{ return: [] }] }
+            - if:
+                condition: { eq: [{ call: [<.hooks.unsubscribe, { call: [xch.param, "id"] }] }, 0] }
+                then:
+                  - call: [xch.error, 404, "no such webhook"]
+                  - return: []
+            - call: [xch.empty, 204]
+
+      - def:
+          name: hook_test
+          args: [[xch, ref<museum.http.Exchange>]]
+          body:
+            - decl: [who, museum.auth.Principal, { call: [<.authorize, xch, "webhook_admin"] }]
+            - if: { condition: { eq: [who.valid, 0] }, then: [{ return: [] }] }
+            - decl: [sub_id, string, { call: [xch.param, "id"] }]
+            - if:
+                condition: { eq: [{ call: [<.hooks.exists, sub_id] }, 0] }
+                then:
+                  - call: [xch.error, 404, "no such webhook"]
+                  - return: []
+            - decl: [delivery, string, { call: [<.hooks.enqueue_one, sub_id, "ping", "{}"] }]
+            - call: [xch.json, 202, "{\"delivery\":\"${delivery}\"}"]
+
+      - def:
+          name: hook_deliveries
+          args: [[xch, ref<museum.http.Exchange>]]
+          body:
+            - decl: [who, museum.auth.Principal, { call: [<.authorize, xch, "webhook_admin"] }]
+            - if: { condition: { eq: [who.valid, 0] }, then: [{ return: [] }] }
+            - decl: [sub_id, string, { call: [xch.param, "id"] }]
+            - if:
+                condition: { eq: [{ call: [<.hooks.exists, sub_id] }, 0] }
+                then:
+                  - call: [xch.error, 404, "no such webhook"]
+                  - return: []
+            - decl: [listing, string, { call: [<.hooks.deliveries_json, sub_id] }]
+            - call: [xch.json, 200, "{\"deliveries\":${listing}}"]
+
+      - def:
+          name: hook_redeliver
+          args: [[xch, ref<museum.http.Exchange>]]
+          body:
+            - decl: [who, museum.auth.Principal, { call: [<.authorize, xch, "webhook_admin"] }]
+            - if: { condition: { eq: [who.valid, 0] }, then: [{ return: [] }] }
+            - if:
+                condition: { eq: [{ call: [<.hooks.redeliver, { call: [xch.param, "id"] }, { call: [xch.param, "delivery"] }] }, 0] }
+                then:
+                  - call: [xch.error, 404, "no such delivery"]
+                  - return: []
+            - call: [xch.empty, 202]
+
+      # ── stage layers (cosmos run-layers artifacts, contract §3) ───────────
+
+      # GET /api/v1/layers/<pipeline> → runs (tags of cosmos-layers/<pipeline>).
+      - def:
+          name: layer_runs
+          args: [[xch, ref<museum.http.Exchange>]]
+          body:
+            - decl: [who, museum.auth.Principal, { call: [<.authorize, xch, "read"] }]
+            - if: { condition: { eq: [who.valid, 0] }, then: [{ return: [] }] }
+            - decl: [pipeline, string, { call: [xch.param, "pipeline"] }]
+            - decl: [repo, string, "cosmos-layers/${pipeline}"]
+            - if:
+                condition: { eq: [{ call: [museum.oci.valid_name, repo] }, 0] }
+                then:
+                  - call: [xch.error, 400, "invalid pipeline name"]
+                  - return: []
+            - decl: [dir, string, { call: [<.registry.repo_dir, repo] }]
+            - decl: [tags, list<string>, { call: [museum.store.list_files, "${dir}/tags"] }]
+            - decl: [out, string, ""]
+            - decl: [idx, i32, 0]
+            - while:
+                condition: { lt: [idx, tags.len] }
+                body:
+                  - decl: [run_id, string, { call: [tags.get, idx] }]
+                  - decl: [digest, string, { call: [museum.store.read_text, "${dir}/tags/${run_id}"] }]
+                  - if:
+                      condition: { gt: [out.len, 0] }
+                      then:
+                        - set: [out, "${out},"]
+                  - set: [out, "${out}{\"run_id\":${{ call: [museum.text.json_str, run_id] }},\"digest\":\"${digest}\"}"]
+                  - set: [idx, { +: [idx, 1] }]
+            - call: [xch.json, 200, "{\"pipeline\":${{ call: [museum.text.json_str, pipeline] }},\"repository\":${{ call: [museum.text.json_str, repo] }},\"runs\":[${out}]}"]
+
+      # GET /api/v1/layers/<pipeline>/<run> → the stages of one run.
+      - def:
+          name: layer_run
+          args: [[xch, ref<museum.http.Exchange>]]
+          body:
+            - decl: [who, museum.auth.Principal, { call: [<.authorize, xch, "read"] }]
+            - if: { condition: { eq: [who.valid, 0] }, then: [{ return: [] }] }
+            - decl: [pipeline, string, { call: [xch.param, "pipeline"] }]
+            - decl: [run_id, string, { call: [xch.param, "run"] }]
+            - decl: [repo, string, "cosmos-layers/${pipeline}"]
+            - if:
+                condition: { or: [{ eq: [{ call: [museum.oci.valid_name, repo] }, 0] }, { eq: [{ call: [museum.oci.valid_tag, run_id] }, 0] }] }
+                then:
+                  - call: [xch.error, 400, "invalid pipeline or run"]
+                  - return: []
+            - decl: [digest, string, { call: [<.registry.resolve, repo, run_id] }]
+            - if:
+                condition: { eq: [digest.len, 0] }
+                then:
+                  - call: [xch.error, 404, "no layers for ${pipeline}/${run_id}"]
+                  - return: []
+            - decl: [hex, string, { call: [museum.oci.digest_hex, digest] }]
+            - decl: [doc, ptr<yaml_doc>, { call: [yaml.parse_file, { call: [museum.store.blob_path, <.data_dir, hex] }] }]
+            - decl: [root, ptr<yaml_node>, { call: [yaml.root, doc] }]
+            - decl: [artifact, string, { call: [yaml.scalar, { call: [yaml.get, root, "artifactType"] }] }]
+            - decl: [layers, ref<yaml_node>, { call: [yaml.get, root, "layers"] }]
+            - decl: [count, i32, { call: [yaml.size, layers] }]
+            - decl: [stages, string, ""]
+            - decl: [total, i64, 0]
+            - decl: [idx, i32, 0]
+            - while:
+                condition: { lt: [idx, count] }
+                body:
+                  - decl: [layer, ref<yaml_node>, { call: [yaml.item, layers, idx] }]
+                  - decl: [notes, ref<yaml_node>, { call: [yaml.get, layer, "annotations"] }]
+                  - decl: [ldigest, string, { call: [yaml.scalar, { call: [yaml.get, layer, "digest"] }] }]
+                  - decl: [lsize, i64, { call: [yaml.scalar, { call: [yaml.get, layer, "size"] }] }]
+                  - decl: [lmedia, string, { call: [yaml.scalar, { call: [yaml.get, layer, "mediaType"] }] }]
+                  - decl: [stage, string, { call: [yaml.scalar, { call: [yaml.get, notes, "cosmos.stage"] }] }]
+                  - decl: [bindings, string, { call: [yaml.scalar, { call: [yaml.get, notes, "cosmos.bindings"] }] }]
+                  - decl: [reuse, string, { call: [yaml.scalar, { call: [yaml.get, notes, "cosmos.reuse"] }] }]
+                  - decl: [step_key, string, { call: [yaml.scalar, { call: [yaml.get, notes, "cosmos.step_key"] }] }]
+                  - decl: [agent, string, { call: [yaml.scalar, { call: [yaml.get, notes, "cosmos.agent"] }] }]
+                  - set: [total, { +: [total, lsize] }]
+                  - if:
+                      condition: { gt: [stages.len, 0] }
+                      then:
+                        - set: [stages, "${stages},"]
+                  - set: [stages, "${stages}{\"index\":${idx},\"stage\":${{ call: [museum.text.json_str, stage] }},\"bindings\":${{ call: [museum.text.json_str, bindings] }},\"reuse\":${{ call: [museum.text.json_str, reuse] }},\"step_key\":${{ call: [museum.text.json_str, step_key] }},\"agent\":${{ call: [museum.text.json_str, agent] }},\"digest\":${{ call: [museum.text.json_str, ldigest] }},\"size\":${lsize},\"media_type\":${{ call: [museum.text.json_str, lmedia] }}}"]
+                  - set: [idx, { +: [idx, 1] }]
+            - call: [yaml.free, doc]
+            - if:
+                condition: { neq: [artifact, { call: [museum.api.run_layers_type] }] }
+                then:
+                  - call: [xch.error, 422, "${repo}:${run_id} is not a cosmos run-layers artifact (${artifact})"]
+                  - return: []
+            - call: [xch.json, 200, "{\"pipeline\":${{ call: [museum.text.json_str, pipeline] }},\"run_id\":${{ call: [museum.text.json_str, run_id] }},\"digest\":\"${digest}\",\"total_size\":${total},\"stages\":[${stages}]}"]
+
+      # ── OCI registry (/v2/) ────────────────────────────────────────────────
+
+      # GET /v2/: without credentials the answer is a Basic challenge, so
+      # clients learn the scheme and send credentials when they have them;
+      # requests without credentials are still served as anonymous.
+      - def:
+          name: v2_base
+          args: [[xch, ref<museum.http.Exchange>]]
+          body:
+            - call: [xch.set_header, "docker-distribution-api-version", "registry/2.0"]
+            - decl: [header, string, { call: [xch.header, "authorization"] }]
+            - decl: [who, museum.auth.Principal, { call: [<.acl.authenticate, header] }]
+            - if:
+                condition: { or: [{ eq: [header.len, 0] }, { eq: [who.valid, 0] }] }
+                then:
+                  - call: [xch.set_header, "www-authenticate", "Basic realm=\"museum\""]
+                  - call: [<.registry.fail, xch, 401, "UNAUTHORIZED", "authentication required"]
+                  - return: []
+            - call: [xch.json, 200, "{}"]
+
+      # Parsed /v2/ route, or kind=invalid (a 404 NAME_INVALID was sent).
+      - def:
+          name: v2_route
+          args: [[xch, ref<museum.http.Exchange>]]
+          return: museum.oci.Route
+          body:
+            - call: [xch.set_header, "docker-distribution-api-version", "registry/2.0"]
+            - decl: [route, museum.oci.Route, { call: [museum.oci.parse_route, { call: [xch.path] }] }]
+            - if:
+                condition: { eq: [route.kind, 0] }
+                then:
+                  - call: [<.registry.fail, xch, 404, "NAME_INVALID", "invalid repository name or path"]
+            - return: [route]
+
+      - def:
+          name: v2_read
+          args: [[xch, ref<museum.http.Exchange>]]
+          body:
+            - decl: [route, museum.oci.Route, { call: [<.v2_route, xch] }]
+            - if: { condition: { eq: [route.kind, 0] }, then: [{ return: [] }] }
+            - if:
+                condition: { eq: [route.kind, 1] }
+                then:
+                  - call: [<.v2_base, xch]
+                  - return: []
+            - decl: [who, museum.auth.Principal, { call: [<.authorize_as, xch, "read", 1] }]
+            - if: { condition: { eq: [who.valid, 0] }, then: [{ return: [] }] }
+            - if:
+                condition: { eq: [route.kind, 4] }
+                then:
+                  - call: [<.registry.get_blob, xch, route]
+                  - return: []
+            - if:
+                condition: { eq: [route.kind, 6] }
+                then:
+                  - call: [<.registry.get_manifest, xch, route]
+                  - return: []
+            - if:
+                condition: { eq: [route.kind, 3] }
+                then:
+                  - call: [<.registry.list_tags, xch, route]
+                  - return: []
+            - if:
+                condition: { eq: [route.kind, 2] }
+                then:
+                  - call: [<.registry.catalog, xch]
+                  - return: []
+            - if:
+                condition: { eq: [route.kind, 5] }
+                then:
+                  - call: [<.registry.upload_status, xch, route]
+                  - return: []
+            - call: [<.registry.fail, xch, 404, "UNSUPPORTED", "not found"]
+
+      - def:
+          name: v2_post
+          args: [[xch, ref<museum.http.Exchange>]]
+          body:
+            - decl: [route, museum.oci.Route, { call: [<.v2_route, xch] }]
+            - if: { condition: { eq: [route.kind, 0] }, then: [{ return: [] }] }
+            - decl: [who, museum.auth.Principal, { call: [<.authorize_as, xch, "write", 1] }]
+            - if: { condition: { eq: [who.valid, 0] }, then: [{ return: [] }] }
+            - if:
+                condition: { and: [{ eq: [route.kind, 5] }, { eq: [route.ref.len, 0] }] }
+                then:
+                  - call: [<.registry.start_upload, xch, route]
+                  - return: []
+            - call: [<.registry.fail, xch, 405, "UNSUPPORTED", "method not allowed here"]
+
+      - def:
+          name: v2_patch
+          args: [[xch, ref<museum.http.Exchange>]]
+          body:
+            - decl: [route, museum.oci.Route, { call: [<.v2_route, xch] }]
+            - if: { condition: { eq: [route.kind, 0] }, then: [{ return: [] }] }
+            - decl: [who, museum.auth.Principal, { call: [<.authorize_as, xch, "write", 1] }]
+            - if: { condition: { eq: [who.valid, 0] }, then: [{ return: [] }] }
+            - if:
+                condition: { eq: [route.kind, 5] }
+                then:
+                  - call: [<.registry.patch_upload, xch, route]
+                  - return: []
+            - call: [<.registry.fail, xch, 405, "UNSUPPORTED", "method not allowed here"]
+
+      - def:
+          name: v2_put
+          args: [[xch, ref<museum.http.Exchange>]]
+          body:
+            - decl: [route, museum.oci.Route, { call: [<.v2_route, xch] }]
+            - if: { condition: { eq: [route.kind, 0] }, then: [{ return: [] }] }
+            - decl: [who, museum.auth.Principal, { call: [<.authorize_as, xch, "write", 1] }]
+            - if: { condition: { eq: [who.valid, 0] }, then: [{ return: [] }] }
+            - if:
+                condition: { eq: [route.kind, 5] }
+                then:
+                  - call: [<.registry.finish_upload, xch, route]
+                  - return: []
+            - if:
+                condition: { eq: [route.kind, 6] }
+                then:
+                  - call: [<.registry.put_manifest, xch, route]
+                  - call: [<.flush_registry_events]
+                  - return: []
+            - call: [<.registry.fail, xch, 405, "UNSUPPORTED", "method not allowed here"]
+
+      - def:
+          name: v2_delete
+          args: [[xch, ref<museum.http.Exchange>]]
+          body:
+            - decl: [route, museum.oci.Route, { call: [<.v2_route, xch] }]
+            - if: { condition: { eq: [route.kind, 0] }, then: [{ return: [] }] }
+            - if:
+                condition: { eq: [route.kind, 5] }
+                then:
+                  - decl: [writer, museum.auth.Principal, { call: [<.authorize_as, xch, "write", 1] }]
+                  - if: { condition: { eq: [writer.valid, 0] }, then: [{ return: [] }] }
+                  - call: [<.registry.cancel_upload, xch, route]
+                  - return: []
+            - decl: [who, museum.auth.Principal, { call: [<.authorize_as, xch, "delete", 1] }]
+            - if: { condition: { eq: [who.valid, 0] }, then: [{ return: [] }] }
+            - if:
+                condition: { eq: [route.kind, 6] }
+                then:
+                  - call: [<.registry.delete_manifest, xch, route]
+                  - return: []
+            - call: [<.registry.fail, xch, 405, "UNSUPPORTED", "blobs are shared and not deleted individually"]
