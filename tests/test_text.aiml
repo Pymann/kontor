@@ -1,0 +1,34 @@
+# Expected exit code: 0
+- import: "../lib/text.aiml"
+
+- def:
+    name: check
+    args: [[label, string], [got, string], [want, string]]
+    return: i32
+    body:
+      - if:
+          condition: { eq: [got, want] }
+          then:
+            - return: [0]
+      - print: ["[FAIL] ${label}: got ${got} want ${want}"]
+      - return: [1]
+
+- def:
+    name: main
+    return: i32
+    body:
+      - decl: [fails, i32, 0]
+      - decl: [items, list<string>]
+      - call: [items.push, "a\"b"]
+      - call: [items.push, "c"]
+      - set: [fails, { +: [fails, { call: [check, "json_list", { call: [museum.text.json_list, items] }, "[\"a\\\"b\",\"c\"]"] }] }]
+      - decl: [cmp_a, i32, { call: [museum.text.version_cmp, "1.10.0", "1.9.3"] }]
+      - decl: [cmp_b, i32, { call: [museum.text.version_cmp, "1.2", "1.2.0"] }]
+      - decl: [cmp_c, i32, { call: [museum.text.version_cmp, "0.9", "1.0"] }]
+      - set: [fails, { +: [fails, { call: [check, "cmp", "${cmp_a} ${cmp_b} ${cmp_c}", "1 0 -1"] }] }]
+      - decl: [safe_a, i32, { call: [museum.text.safe_rel_path, "libs/foo/1.0/foo.tgz"] }]
+      - decl: [safe_b, i32, { call: [museum.text.safe_rel_path, "libs/../etc/passwd"] }]
+      - decl: [safe_c, i32, { call: [museum.text.safe_rel_path, "libs//x"] }]
+      - set: [fails, { +: [fails, { call: [check, "safe", "${safe_a} ${safe_b} ${safe_c}", "1 0 0"] }] }]
+      - print: ["text tests failed: ${fails}"]
+      - return: [fails]

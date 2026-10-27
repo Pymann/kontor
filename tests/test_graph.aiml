@@ -1,0 +1,61 @@
+# Expected exit code: 0
+# Builds a data dir from tests/fixtures and checks the rebuild plans.
+- import: "../lib/graph.aiml"
+
+- def:
+    name: stage
+    args: [[data_dir, string], [name, string], [version, string]]
+    body:
+      - decl: [src_text, string, { call: [io.read_file, "tests/fixtures/${name}-${version}.exodus.json"] }]
+      - call: [museum.store.write_text, data_dir, "${data_dir}/exodus/${name}/${version}", "exodus.json", src_text]
+
+- def:
+    name: expect_contains
+    args: [[label, string], [haystack, string], [needle, string]]
+    return: i32
+    body:
+      - if:
+          condition: { ge: [{ call: [haystack.index_of, needle] }, 0] }
+          then:
+            - return: [0]
+      - print: ["[FAIL] ${label}: missing ${needle}"]
+      - print: ["       in ${haystack}"]
+      - return: [1]
+
+- def:
+    name: main
+    return: i32
+    body:
+      - decl: [data_dir, string, "/tmp/museum_graph_test"]
+      - call: [io.remove_all, data_dir]
+      - call: [stage, data_dir, "zlib-lite", "1.0.0"]
+      - call: [stage, data_dir, "core", "1.0.0"]
+      - call: [stage, data_dir, "net", "1.0.0"]
+      - call: [stage, data_dir, "app", "2.0.0"]
+      - call: [stage, data_dir, "tool", "1.0.0"]
+      - call: [stage, data_dir, "legacy", "0.5.0"]
+      - call: [stage, data_dir, "legacy", "1.0.0"]
+      - decl: [graph, ptr<museum.graph.DependencyGraph>, { new: museum.graph.DependencyGraph }]
+      - call: [graph.load, data_dir]
+
+      - decl: [fails, i32, 0]
+      - decl: [plan, string, { call: [graph.impact_json, "project", "zlib-lite", "1.1.0"] }]
+      - set: [fails, { +: [fails, { call: [expect_contains, "project waves", plan, "\"rebuild_waves\":[[\"core\"],[\"legacy\",\"net\"],[\"app\"]]"] }] }]
+      - set: [fails, { +: [fails, { call: [expect_contains, "pinned consumer", plan, "{\"project\":\"tool\",\"pins\":\"0.9.0\"}"] }] }]
+      - set: [fails, { +: [fails, { call: [expect_contains, "count", plan, "\"rebuild_count\":4"] }] }]
+
+      - decl: [leaf, string, { call: [graph.impact_json, "project", "app", "2.0.1"] }]
+      - set: [fails, { +: [fails, { call: [expect_contains, "leaf", leaf, "\"rebuild_waves\":[]"] }] }]
+
+      - decl: [apt_new, string, { call: [graph.impact_json, "apt", "libssl-dev", "3.0.13-0ubuntu3.16"] }]
+      - set: [fails, { +: [fails, { call: [expect_contains, "apt bump", apt_new, "\"rebuild_waves\":[[\"core\"],[\"legacy\",\"net\"],[\"app\"]]"] }] }]
+      - decl: [apt_same, string, { call: [graph.impact_json, "apt", "libssl-dev", "3.0.13-0ubuntu3.7"] }]
+      - set: [fails, { +: [fails, { call: [expect_contains, "apt pinned same", apt_same, "\"up_to_date\":[\"core\"]"] }] }]
+      - set: [fails, { +: [fails, { call: [expect_contains, "apt pinned same count", apt_same, "\"rebuild_count\":0"] }] }]
+
+      - decl: [graph_out, string, { call: [graph.graph_json] }]
+      - set: [fails, { +: [fails, { call: [expect_contains, "newest version", graph_out, "{\"name\":\"legacy\",\"version\":\"1.0.0\""] }] }]
+
+      - call: [io.remove_all, data_dir]
+      - print: ["graph tests failed: ${fails}"]
+      - return: [fails]

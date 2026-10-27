@@ -1,0 +1,109 @@
+# museum.http — one request/response pair with the helpers handlers need.
+
+- namespace: museum.http
+
+- import: "text.aiml"
+
+- class:
+    name: Exchange
+    members:
+      - [req, http_request_handle, null, { access: public }]
+      - [resp, http_response_handle, null, { access: public }]
+    methods:
+      # Named route segment ("/exodus/:name/...") or "".
+      - def:
+          name: param
+          args: [[key, string]]
+          return: string
+          body:
+            - decl: [params, map<string:string>]
+            - set: [params, <.req.params]
+            - decl: [val, string, { call: [params.get, key] }]
+            - if:
+                condition: { eq: [val, null] }
+                then:
+                  - return: [""]
+            - return: [val]
+
+      # Query parameter or "".
+      - def:
+          name: query
+          args: [[key, string]]
+          return: string
+          body:
+            - decl: [qurl, url]
+            - set: [qurl, <.req.url]
+            - decl: [val, string, { call: [qurl.get_param.get, key] }]
+            - if:
+                condition: { eq: [val, null] }
+                then:
+                  - return: [""]
+            - return: [val]
+
+      # Request header (lower-case name) or "".
+      - def:
+          name: header
+          args: [[key, string]]
+          return: string
+          body:
+            - decl: [inreq, http_request_handle, <.req]
+            - decl: [val, string, { call: [inreq.header, key] }]
+            - if:
+                condition: { eq: [val, null] }
+                then:
+                  - return: [""]
+            - return: [val]
+
+      - def:
+          name: path
+          return: string
+          body:
+            - decl: [inreq, http_request_handle, <.req]
+            - return: [inreq.path]
+
+      # Body as text ("" when empty).
+      - def:
+          name: text
+          return: string
+          body:
+            - decl: [inreq, http_request_handle, <.req]
+            - decl: [val, string, inreq.body]
+            - if:
+                condition: { eq: [val, null] }
+                then:
+                  - return: [""]
+            - return: [val]
+
+      - def:
+          name: json
+          args: [[status, i32], [payload, string]]
+          body:
+            - decl: [out, http_response_handle, <.resp]
+            - call: [out.headers.put, "content-type", "application/json"]
+            - set: [out.status, status]
+            - set: [out.body, "${payload}\n"]
+            - call: [out.send]
+
+      - def:
+          name: error
+          args: [[status, i32], [message, string]]
+          body:
+            - decl: [msg_json, string, { call: [museum.text.json_str, message] }]
+            - call: [<.json, status, "{\"error\":${msg_json}}"]
+
+      # Streams a file (Range-aware) with the given content type.
+      - def:
+          name: file
+          args: [[file_path, string], [content_type, string]]
+          body:
+            - decl: [out, http_response_handle, <.resp]
+            - call: [out.headers.put, "content-type", content_type]
+            - set: [out.body_file, file_path]
+            - call: [out.send]
+
+      - def:
+          name: set_header
+          args: [[key, string], [val, string]]
+          body:
+            - decl: [out, http_response_handle, <.resp]
+            - call: [out.headers.put, key, val]

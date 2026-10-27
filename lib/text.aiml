@@ -1,0 +1,135 @@
+# museum.text — JSON output helpers, version ordering and path-segment checks.
+
+- namespace: museum.text
+
+# JSON string literal with quotes; escapes backslash, quote and control newlines.
+- def:
+    name: json_str
+    args: [[raw, string]]
+    return: string
+    body:
+      - decl: [esc, string, raw]
+      - set: [esc, { call: [esc.replace, "\\", "\\\\"] }]
+      - set: [esc, { call: [esc.replace, "\"", "\\\""] }]
+      - set: [esc, { call: [esc.replace, "\n", "\\n"] }]
+      - set: [esc, { call: [esc.replace, "\r", "\\r"] }]
+      - set: [esc, { call: [esc.replace, "\t", "\\t"] }]
+      - return: ["\"${esc}\""]
+
+# JSON array of strings.
+- def:
+    name: json_list
+    args: [[items, list<string>]]
+    return: string
+    body:
+      - decl: [out, string, "["]
+      - decl: [idx, i32, 0]
+      - while:
+          condition: { lt: [idx, items.len] }
+          body:
+            - decl: [item, string, { call: [items.get, idx] }]
+            - decl: [quoted, string, { call: [museum.text.json_str, item] }]
+            - if:
+                condition: { gt: [idx, 0] }
+                then:
+                  - set: [out, "${out},"]
+            - set: [out, "${out}${quoted}"]
+            - set: [idx, { +: [idx, 1] }]
+      - return: ["${out}]"]
+
+# Numeric-aware version comparison on dot-separated parts ("1.10.0" > "1.9.3").
+# Returns -1, 0 or 1. Non-numeric parts compare lexically.
+- def:
+    name: version_cmp
+    args: [[left, string], [right, string]]
+    return: i32
+    body:
+      - decl: [lparts, list<string>, { call: [left.split, "."] }]
+      - decl: [rparts, list<string>, { call: [right.split, "."] }]
+      - decl: [count, i32, lparts.len]
+      - if:
+          condition: { gt: [rparts.len, count] }
+          then:
+            - set: [count, rparts.len]
+      - decl: [idx, i32, 0]
+      - decl: [result, i32, 0]
+      - while:
+          condition: { and: [{ lt: [idx, count] }, { eq: [result, 0] }] }
+          body:
+            - decl: [lpart, string, "0"]
+            - decl: [rpart, string, "0"]
+            - if:
+                condition: { lt: [idx, lparts.len] }
+                then:
+                  - set: [lpart, { call: [lparts.get, idx] }]
+            - if:
+                condition: { lt: [idx, rparts.len] }
+                then:
+                  - set: [rpart, { call: [rparts.get, idx] }]
+            - decl: [lnum, i64, lpart]
+            - decl: [rnum, i64, rpart]
+            - if:
+                condition: { lt: [lnum, rnum] }
+                then:
+                  - set: [result, -1]
+            - if:
+                condition: { gt: [lnum, rnum] }
+                then:
+                  - set: [result, 1]
+            # Equal numeric prefix ("1rc" vs "1"): fall back to lexical order.
+            - if:
+                condition: { and: [{ eq: [result, 0] }, { neq: [lpart, rpart] }] }
+                then:
+                  - if:
+                      condition: { lt: [lpart, rpart] }
+                      then:
+                        - set: [result, -1]
+                      else:
+                        - set: [result, 1]
+            - set: [idx, { +: [idx, 1] }]
+      - return: [result]
+
+# A single URL path segment that is safe to use as a directory name.
+- def:
+    name: safe_segment
+    args: [[seg, string]]
+    return: i32
+    body:
+      - if:
+          condition: { eq: [seg.len, 0] }
+          then:
+            - return: [0]
+      # Dot-only segments (".", "..", "...") would escape or alias directories.
+      - decl: [undotted, string, { call: [seg.replace, ".", ""] }]
+      - if:
+          condition: { eq: [undotted.len, 0] }
+          then:
+            - return: [0]
+      - if:
+          condition: { or: [{ ge: [{ call: [seg.index_of, "/"] }, 0] }, { ge: [{ call: [seg.index_of, "\\"] }, 0] }] }
+          then:
+            - return: [0]
+      - return: [1]
+
+# A relative artifact path ("libs/foo/1.0/foo.tar.gz") whose segments are all safe.
+- def:
+    name: safe_rel_path
+    args: [[rel, string]]
+    return: i32
+    body:
+      - if:
+          condition: { eq: [rel.len, 0] }
+          then:
+            - return: [0]
+      - decl: [segs, list<string>, { call: [rel.split, "/"] }]
+      - decl: [idx, i32, 0]
+      - while:
+          condition: { lt: [idx, segs.len] }
+          body:
+            - decl: [seg, string, { call: [segs.get, idx] }]
+            - if:
+                condition: { eq: [{ call: [museum.text.safe_segment, seg] }, 0] }
+                then:
+                  - return: [0]
+            - set: [idx, { +: [idx, 1] }]
+      - return: [1]

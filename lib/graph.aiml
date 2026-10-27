@@ -1,0 +1,397 @@
+# museum.graph — dependency graph over Exodus projects and rebuild planning.
+#
+# The graph is built from the stored manifests (data/exodus/<name>/<version>/
+# exodus.json). For each project the newest version is the node; its
+# `dependencies` (other Exodus projects) and `apt_packages` (system packages)
+# are the edges. Rebuild planning walks the reverse edges from a changed
+# project or apt package and orders the affected projects into waves: every
+# project in wave N only depends on projects from earlier waves (or none of
+# the affected set), so each wave can be built in parallel.
+#
+# Edge lists are kept as "name\tspec\n..." strings per project.
+
+- namespace: museum.graph
+
+- import: "text.aiml"
+- import: "store.aiml"
+
+# "name\tspec\n" lines for one sequence of {name, version} mappings.
+- def:
+    name: edge_lines
+    args: [[seq, ptr<yaml_node>]]
+    return: string
+    body:
+      - decl: [out, string, ""]
+      - decl: [count, i32, { call: [yaml.size, seq] }]
+      - decl: [idx, i32, 0]
+      - while:
+          condition: { lt: [idx, count] }
+          body:
+            - decl: [item, ptr<yaml_node>, { call: [yaml.item, seq, idx] }]
+            - decl: [dep_name, string, { call: [yaml.scalar, { call: [yaml.get, item, "name"] }] }]
+            - decl: [dep_spec, string, { call: [yaml.scalar, { call: [yaml.get, item, "version"] }] }]
+            - if:
+                condition: { gt: [dep_name.len, 0] }
+                then:
+                  - set: [out, "${out}${dep_name}\t${dep_spec}\n"]
+            - set: [idx, { +: [idx, 1] }]
+      - return: [out]
+
+# Newest version directory of a project ("" when none).
+- def:
+    name: newest_version
+    args: [[data_dir, string], [name, string]]
+    return: string
+    body:
+      - decl: [versions, list<string>, { call: [museum.store.list_subdirs, "${data_dir}/exodus/${name}"] }]
+      - decl: [best, string, ""]
+      - decl: [idx, i32, 0]
+      - while:
+          condition: { lt: [idx, versions.len] }
+          body:
+            - decl: [cand, string, { call: [versions.get, idx] }]
+            - decl: [has_manifest, bool, { call: [io.exists, "${data_dir}/exodus/${name}/${cand}/exodus.json"] }]
+            - if:
+                condition: { and: [has_manifest, { or: [{ eq: [best.len, 0] }, { gt: [{ call: [museum.text.version_cmp, cand, best] }, 0] }] }] }
+                then:
+                  - set: [best, cand]
+            - set: [idx, { +: [idx, 1] }]
+      - return: [best]
+
+# Package digest of the newest version below `version` that has a package
+# ("" when there is none). Used to detect rebuilds that produced identical
+# bytes — those need no downstream rebuild.
+- def:
+    name: previous_package_digest
+    args: [[data_dir, string], [name, string], [version, string]]
+    return: string
+    body:
+      - decl: [versions, list<string>, { call: [museum.store.list_subdirs, "${data_dir}/exodus/${name}"] }]
+      - decl: [best, string, ""]
+      - decl: [idx, i32, 0]
+      - while:
+          condition: { lt: [idx, versions.len] }
+          body:
+            - decl: [cand, string, { call: [versions.get, idx] }]
+            - decl: [is_older, i32, 0]
+            - if:
+                condition: { lt: [{ call: [museum.text.version_cmp, cand, version] }, 0] }
+                then:
+                  - set: [is_older, 1]
+            - decl: [has_pkg, bool, { call: [io.exists, "${data_dir}/exodus/${name}/${cand}/package.sha256"] }]
+            - if:
+                condition: { and: [{ eq: [is_older, 1] }, has_pkg] }
+                then:
+                  - if:
+                      condition: { or: [{ eq: [best.len, 0] }, { gt: [{ call: [museum.text.version_cmp, cand, best] }, 0] }] }
+                      then:
+                        - set: [best, cand]
+            - set: [idx, { +: [idx, 1] }]
+      - if:
+          condition: { eq: [best.len, 0] }
+          then:
+            - return: [""]
+      - return: [{ call: [museum.store.read_text, "${data_dir}/exodus/${name}/${best}/package.sha256"] }]
+
+# Spec of `target` in an edge string, or "\u0001" (absent marker) when `target`
+# is not listed. An empty spec means "any / latest".
+- def:
+    name: edge_spec
+    args: [[edges, string], [target, string]]
+    return: string
+    body:
+      - decl: [lines, list<string>, { call: [edges.split, "\n"] }]
+      - decl: [idx, i32, 0]
+      - while:
+          condition: { lt: [idx, lines.len] }
+          body:
+            - decl: [line, string, { call: [lines.get, idx] }]
+            - decl: [tab, i32, { call: [line.index_of, "\t"] }]
+            - if:
+                condition: { gt: [tab, 0] }
+                then:
+                  - decl: [edge_name, string, { call: [line.substr, 0, tab] }]
+                  - if:
+                      condition: { eq: [edge_name, target] }
+                      then:
+                        - return: [{ call: [line.substr, { +: [tab, 1] }] }]
+            - set: [idx, { +: [idx, 1] }]
+      - return: ["\u0001"]
+
+# 1 when edge_spec found no edge.
+- def:
+    name: is_absent
+    args: [[spec, string]]
+    return: i32
+    body:
+      - if:
+          condition: { eq: [spec, "\u0001"] }
+          then:
+            - return: [1]
+      - return: [0]
+
+# Does a dependency spec accept the given (new) version? Empty, "*" and
+# "latest" float; anything else must match exactly.
+- def:
+    name: spec_accepts
+    args: [[spec, string], [version, string]]
+    return: i32
+    body:
+      - if:
+          condition: { eq: [spec.len, 0] }
+          then:
+            - return: [1]
+      - if:
+          condition: { eq: [spec, version] }
+          then:
+            - return: [1]
+      - decl: [floating, string, { call: [spec.replace, "*", ""] }]
+      - if:
+          condition: { eq: [floating.len, 0] }
+          then:
+            - return: [1]
+      - if:
+          condition: { eq: [{ call: [spec.lower] }, "latest"] }
+          then:
+            - return: [1]
+      - return: [0]
+
+# Edge string -> [{"name":..,"spec":..}, ...]
+- def:
+    name: edges_json
+    args: [[edges, string]]
+    return: string
+    body:
+      - decl: [out, string, ""]
+      - decl: [lines, list<string>, { call: [edges.split, "\n"] }]
+      - decl: [idx, i32, 0]
+      - decl: [emitted, i32, 0]
+      - while:
+          condition: { lt: [idx, lines.len] }
+          body:
+            - decl: [line, string, { call: [lines.get, idx] }]
+            - decl: [tab, i32, { call: [line.index_of, "\t"] }]
+            - if:
+                condition: { gt: [tab, 0] }
+                then:
+                  - decl: [edge_name, string, { call: [museum.text.json_str, { call: [line.substr, 0, tab] }] }]
+                  - decl: [edge_spec, string, { call: [museum.text.json_str, { call: [line.substr, { +: [tab, 1] }] }] }]
+                  - if:
+                      condition: { gt: [emitted, 0] }
+                      then:
+                        - set: [out, "${out},"]
+                  - set: [out, "${out}{\"name\":${edge_name},\"spec\":${edge_spec}}"]
+                  - set: [emitted, { +: [emitted, 1] }]
+            - set: [idx, { +: [idx, 1] }]
+      - return: ["[${out}]"]
+
+# One snapshot of the graph. Build a fresh instance to reload (maps have no
+# clear() yet, see README "aiml notes").
+- class:
+    name: DependencyGraph
+    members:
+      - [names, list<string>, null, { access: public }]
+      - [latest, map<string:string>, null, { access: public }]
+      - [deps, map<string:string>, null, { access: public }]
+      - [apt, map<string:string>, null, { access: public }]
+    methods:
+      # Fills `<` (a fresh instance) from the stored manifests.
+      - def:
+          name: load
+          args: [[data_dir, string]]
+          body:
+            - decl: [projects, list<string>, { call: [museum.store.list_subdirs, "${data_dir}/exodus"] }]
+            - decl: [idx, i32, 0]
+            - while:
+                condition: { lt: [idx, projects.len] }
+                body:
+                  - decl: [name, string, { call: [projects.get, idx] }]
+                  - decl: [version, string, { call: [museum.graph.newest_version, data_dir, name] }]
+                  - if:
+                      condition: { gt: [version.len, 0] }
+                      then:
+                        - decl: [doc, ptr<yaml_doc>, { call: [yaml.parse_file, "${data_dir}/exodus/${name}/${version}/exodus.json"] }]
+                        - decl: [root, ptr<yaml_node>, { call: [yaml.root, doc] }]
+                        - decl: [deps, string, { call: [museum.graph.edge_lines, { call: [yaml.get, root, "dependencies"] }] }]
+                        - decl: [apts, string, { call: [museum.graph.edge_lines, { call: [yaml.get, root, "apt_packages"] }] }]
+                        - call: [yaml.free, doc]
+                        - call: [<.names.push, name]
+                        - call: [<.latest.put, name, version]
+                        - call: [<.deps.put, name, deps]
+                        - call: [<.apt.put, name, apts]
+                  - set: [idx, { +: [idx, 1] }]
+
+      # Projects to rebuild, as JSON, for a trigger:
+      #   kind "project": `name` was published as `version` — dependents rebuild.
+      #   kind "apt":     system package `name` moved to `version` ("" = any change)
+      #                   — every project pinning another version rebuilds.
+      - def:
+          name: impact_json
+          args: [[kind, string], [name, string], [version, string]]
+          return: string
+          body:
+            - decl: [affected, list<string>]
+            - decl: [outdated, string, ""]
+            - decl: [up_to_date, list<string>]
+            - decl: [is_apt, i32, { call: [kind.starts_with, "apt"] }]
+
+            # Direct hits from the trigger.
+            - decl: [idx, i32, 0]
+            - while:
+                condition: { lt: [idx, <.names.len] }
+                body:
+                  - decl: [proj, string, { call: [<.names.get, idx] }]
+                  - if:
+                      condition: { eq: [is_apt, 1] }
+                      then:
+                        - decl: [pin, string, { call: [museum.graph.edge_spec, { call: [<.apt.get, proj] }, name] }]
+                        - if:
+                            condition: { eq: [{ call: [museum.graph.is_absent, pin] }, 0] }
+                            then:
+                              - if:
+                                  condition: { or: [{ eq: [version.len, 0] }, { neq: [pin, version] }] }
+                                  then:
+                                    - call: [affected.push, proj]
+                                  else:
+                                    - call: [up_to_date.push, proj]
+                      else:
+                        - if:
+                            condition: { neq: [proj, name] }
+                            then:
+                              - decl: [spec, string, { call: [museum.graph.edge_spec, { call: [<.deps.get, proj] }, name] }]
+                              - if:
+                                  condition: { eq: [{ call: [museum.graph.is_absent, spec] }, 0] }
+                                  then:
+                                    - if:
+                                        condition: { eq: [{ call: [museum.graph.spec_accepts, spec, version] }, 1] }
+                                        then:
+                                          - call: [affected.push, proj]
+                                        else:
+                                          - decl: [proj_json, string, { call: [museum.text.json_str, proj] }]
+                                          - decl: [spec_json, string, { call: [museum.text.json_str, spec] }]
+                                          - if:
+                                              condition: { gt: [outdated.len, 0] }
+                                              then:
+                                                - set: [outdated, "${outdated},"]
+                                          - set: [outdated, "${outdated}{\"project\":${proj_json},\"pins\":${spec_json}}"]
+                  - set: [idx, { +: [idx, 1] }]
+
+            # Transitive dependents of everything that gets rebuilt. Intermediate
+            # rebuilds publish versions we cannot know yet, so every dependent of an
+            # affected project is affected regardless of its spec.
+            - decl: [cursor, i32, 0]
+            - while:
+                condition: { lt: [cursor, affected.len] }
+                body:
+                  - decl: [changed, string, { call: [affected.get, cursor] }]
+                  - decl: [pidx, i32, 0]
+                  - while:
+                      condition: { lt: [pidx, <.names.len] }
+                      body:
+                        - decl: [proj, string, { call: [<.names.get, pidx] }]
+                        - decl: [already, i32, { call: [affected.contains, proj] }]
+                        - decl: [is_root, i32, 0]
+                        - if:
+                            condition: { and: [{ eq: [is_apt, 0] }, { eq: [proj, name] }] }
+                            then:
+                              - set: [is_root, 1]
+                        - if:
+                            condition: { and: [{ eq: [already, 0] }, { eq: [is_root, 0] }] }
+                            then:
+                              - decl: [spec, string, { call: [museum.graph.edge_spec, { call: [<.deps.get, proj] }, changed] }]
+                              - if:
+                                  condition: { eq: [{ call: [museum.graph.is_absent, spec] }, 0] }
+                                  then:
+                                    - call: [affected.push, proj]
+                        - set: [pidx, { +: [pidx, 1] }]
+                  - set: [cursor, { +: [cursor, 1] }]
+
+            # Order into waves (Kahn): a project is ready once none of its
+            # dependencies is still waiting inside the affected set.
+            - decl: [waiting, list<string>]
+            - call: [waiting.extend, affected]
+            - call: [waiting.sort]
+            - decl: [waves, string, ""]
+            - decl: [cycle, list<string>]
+            - decl: [progress, i32, 1]
+            - while:
+                condition: { and: [{ gt: [waiting.len, 0] }, { eq: [progress, 1] }] }
+                body:
+                  - decl: [ready, list<string>]
+                  - decl: [blocked, list<string>]
+                  - decl: [widx, i32, 0]
+                  - while:
+                      condition: { lt: [widx, waiting.len] }
+                      body:
+                        - decl: [cand, string, { call: [waiting.get, widx] }]
+                        - decl: [cand_edges, string, { call: [<.deps.get, cand] }]
+                        - decl: [is_blocked, i32, 0]
+                        - decl: [oidx, i32, 0]
+                        - while:
+                            condition: { lt: [oidx, waiting.len] }
+                            body:
+                              - decl: [other, string, { call: [waiting.get, oidx] }]
+                              - if:
+                                  condition: { neq: [other, cand] }
+                                  then:
+                                    - decl: [dep_on, string, { call: [museum.graph.edge_spec, cand_edges, other] }]
+                                    - if:
+                                        condition: { eq: [{ call: [museum.graph.is_absent, dep_on] }, 0] }
+                                        then:
+                                          - set: [is_blocked, 1]
+                              - set: [oidx, { +: [oidx, 1] }]
+                        - if:
+                            condition: { eq: [is_blocked, 1] }
+                            then:
+                              - call: [blocked.push, cand]
+                            else:
+                              - call: [ready.push, cand]
+                        - set: [widx, { +: [widx, 1] }]
+                  - if:
+                      condition: { eq: [ready.len, 0] }
+                      then:
+                        - set: [progress, 0]
+                        - call: [cycle.extend, blocked]
+                      else:
+                        - decl: [wave_json, string, { call: [museum.text.json_list, ready] }]
+                        - if:
+                            condition: { gt: [waves.len, 0] }
+                            then:
+                              - set: [waves, "${waves},"]
+                        - set: [waves, "${waves}${wave_json}"]
+                        - call: [waiting.clear]
+                        - call: [waiting.extend, blocked]
+
+            - decl: [kind_json, string, { call: [museum.text.json_str, kind] }]
+            - decl: [name_json, string, { call: [museum.text.json_str, name] }]
+            - decl: [version_json, string, { call: [museum.text.json_str, version] }]
+            - decl: [cycle_json, string, { call: [museum.text.json_list, cycle] }]
+            - decl: [current_json, string, { call: [museum.text.json_list, up_to_date] }]
+            - decl: [total, i32, affected.len]
+            - return: ["{\"trigger\":{\"kind\":${kind_json},\"name\":${name_json},\"version\":${version_json}},\"rebuild_count\":${total},\"rebuild_waves\":[${waves}],\"outdated_pins\":[${outdated}],\"up_to_date\":${current_json},\"cycles\":${cycle_json}}"]
+
+      # Whole graph as JSON: nodes with their newest version and both edge kinds.
+
+      - def:
+          name: graph_json
+          return: string
+          body:
+            - decl: [out, string, ""]
+            - decl: [idx, i32, 0]
+            - while:
+                condition: { lt: [idx, <.names.len] }
+                body:
+                  - decl: [proj, string, { call: [<.names.get, idx] }]
+                  - decl: [version, string, { call: [<.latest.get, proj] }]
+                  - decl: [deps_json, string, { call: [museum.graph.edges_json, { call: [<.deps.get, proj] }] }]
+                  - decl: [apt_json, string, { call: [museum.graph.edges_json, { call: [<.apt.get, proj] }] }]
+                  - decl: [proj_json, string, { call: [museum.text.json_str, proj] }]
+                  - decl: [ver_json, string, { call: [museum.text.json_str, version] }]
+                  - if:
+                      condition: { gt: [idx, 0] }
+                      then:
+                        - set: [out, "${out},"]
+                  - set: [out, "${out}{\"name\":${proj_json},\"version\":${ver_json},\"dependencies\":${deps_json},\"apt_packages\":${apt_json}}"]
+                  - set: [idx, { +: [idx, 1] }]
+            - return: ["{\"projects\":[${out}]}"]
+

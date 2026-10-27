@@ -1,0 +1,96 @@
+# museum.store — content-addressed blob storage and small metadata files.
+#
+# Layout below the data directory:
+#   cas/<aa>/<sha256>      blob bytes, deduplicated by content hash
+#   tmp/                   staging area for atomic writes (write + rename)
+
+- namespace: museum.store
+
+- def:
+    name: blob_path
+    args: [[data_dir, string], [digest, string]]
+    return: string
+    body:
+      - decl: [shard, string, { call: [digest.substr, 0, 2] }]
+      - return: ["${data_dir}/cas/${shard}/${digest}"]
+
+# Stores the payload under its sha256 and returns the digest. Existing blobs
+# are not rewritten, so identical uploads cost no extra disk space.
+- def:
+    name: put_blob
+    args: [[data_dir, string], [payload, buffer<u8>]]
+    return: string
+    body:
+      - decl: [digest, string, { call: [hash.sha256, payload] }]
+      - decl: [final_path, string, { call: [museum.store.blob_path, data_dir, digest] }]
+      - if:
+          condition: { call: [io.exists, final_path] }
+          then:
+            - return: [digest]
+      - decl: [shard, string, { call: [digest.substr, 0, 2] }]
+      - call: [io.mkdir_all, "${data_dir}/cas/${shard}"]
+      - call: [io.mkdir_all, "${data_dir}/tmp"]
+      - decl: [stage_path, string, "${data_dir}/tmp/${digest}.part"]
+      - decl: [wrc, i32, { call: [io.write_file, stage_path, payload] }]
+      - if:
+          condition: { neq: [wrc, 0] }
+          then:
+            - return: [""]
+      - call: [io.rename, stage_path, final_path]
+      - return: [digest]
+
+# Writes a small text file atomically (staged in tmp/, then renamed).
+- def:
+    name: write_text
+    args: [[data_dir, string], [dir_path, string], [file_name, string], [content, string]]
+    return: i32
+    body:
+      - call: [io.mkdir_all, dir_path]
+      - call: [io.mkdir_all, "${data_dir}/tmp"]
+      - decl: [stamp, i64, { call: [time.now] }]
+      - decl: [stage_path, string, "${data_dir}/tmp/${file_name}.${stamp}.part"]
+      - decl: [wrc, i32, { call: [io.write_file, stage_path, content] }]
+      - if:
+          condition: { neq: [wrc, 0] }
+          then:
+            - return: [-1]
+      - call: [io.rename, stage_path, "${dir_path}/${file_name}"]
+      - return: [0]
+
+# Reads a small text file; returns "" when it does not exist.
+- def:
+    name: read_text
+    args: [[file_path, string]]
+    return: string
+    body:
+      - if:
+          condition: { call: [io.exists, file_path] }
+          then:
+            - decl: [content, string, { call: [io.read_file, file_path] }]
+            - return: [{ call: [content.trim] }]
+      - return: [""]
+
+# Names of the direct sub-directories of a directory (sorted).
+- def:
+    name: list_subdirs
+    args: [[dir_path, string]]
+    return: list<string>
+    body:
+      - decl: [names, list<string>]
+      - if:
+          condition: { call: [io.is_dir, dir_path] }
+          then:
+            - decl: [entries, list<path>, { call: [io.list_dir, dir_path] }]
+            - decl: [idx, i32, 0]
+            - while:
+                condition: { lt: [idx, entries.len] }
+                body:
+                  - decl: [entry, path, { call: [entries.get, idx] }]
+                  - decl: [entry_name, string, { call: [entry.name] }]
+                  - if:
+                      condition: { call: [io.is_dir, "${dir_path}/${entry_name}"] }
+                      then:
+                        - call: [names.push, entry_name]
+                  - set: [idx, { +: [idx, 1] }]
+      - call: [names.sort]
+      - return: [names]

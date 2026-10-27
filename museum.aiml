@@ -1,0 +1,128 @@
+# museum — artifact repository with dependency-aware rebuild planning.
+#
+#   aiml museum.aiml -- [port] [data_dir]        (defaults: 8081 ./data)
+#
+# Repositories
+#   generic   any file at any path, content-addressed (sha256, deduplicated)
+#   exodus    Exodus projects: exodus.json manifest + package per version;
+#             the manifests feed the dependency graph
+#
+# HTTP API
+#   PUT/GET  /generic/<path>                         upload / download a file
+#   PUT/GET  /exodus/<name>/<version>/exodus.json    project manifest
+#   PUT/GET  /exodus/<name>/<version>/package        build output (any bytes)
+#   GET      /api/graph                              projects + edges (newest versions)
+#   GET      /api/impact?project=<name>&version=<v>  rebuild plan for a new version
+#   GET      /api/impact?apt=<pkg>&version=<v>       rebuild plan for a system package bump
+#   GET      /api/health
+#
+# Uploading a package answers with the rebuild plan for everything that
+# depends on it, unless the bytes equal the previous version's package —
+# then nothing downstream needs to rebuild.
+
+- import: "lib/api.aiml"
+
+- decl: [g_api, ptr<museum.api.RepositoryApi>]
+
+# Route handlers: srv.route needs free functions, so each one wraps the
+# request in an Exchange and hands it to the RepositoryApi.
+
+- def:
+    name: wrap
+    args: [[req, http_request_handle], [resp, http_response_handle]]
+    return: ptr<museum.http.Exchange>
+    body:
+      - decl: [xch, ptr<museum.http.Exchange>, { new: museum.http.Exchange }]
+      - set: [xch.req, req]
+      - set: [xch.resp, resp]
+      - return: [xch]
+
+- def:
+    name: on_health
+    args: [[req, http_request_handle], [resp, http_response_handle]]
+    body:
+      - call: [g_api.health, { call: [wrap, req, resp] }]
+
+- def:
+    name: on_graph
+    args: [[req, http_request_handle], [resp, http_response_handle]]
+    body:
+      - call: [g_api.graph_view, { call: [wrap, req, resp] }]
+
+- def:
+    name: on_impact
+    args: [[req, http_request_handle], [resp, http_response_handle]]
+    body:
+      - call: [g_api.impact, { call: [wrap, req, resp] }]
+
+- def:
+    name: on_manifest_put
+    args: [[req, http_request_handle], [resp, http_response_handle]]
+    body:
+      - call: [g_api.manifest_put, { call: [wrap, req, resp] }]
+
+- def:
+    name: on_manifest_get
+    args: [[req, http_request_handle], [resp, http_response_handle]]
+    body:
+      - call: [g_api.manifest_get, { call: [wrap, req, resp] }]
+
+- def:
+    name: on_package_put
+    args: [[req, http_request_handle], [resp, http_response_handle]]
+    body:
+      - call: [g_api.package_put, { call: [wrap, req, resp] }]
+
+- def:
+    name: on_package_get
+    args: [[req, http_request_handle], [resp, http_response_handle]]
+    body:
+      - call: [g_api.package_get, { call: [wrap, req, resp] }]
+
+- def:
+    name: on_generic_put
+    args: [[req, http_request_handle], [resp, http_response_handle]]
+    body:
+      - call: [g_api.generic_put, { call: [wrap, req, resp] }]
+
+- def:
+    name: on_generic_get
+    args: [[req, http_request_handle], [resp, http_response_handle]]
+    body:
+      - call: [g_api.generic_get, { call: [wrap, req, resp] }]
+
+- def:
+    name: main
+    return: i32
+    body:
+      - decl: [port, i32, 8081]
+      - decl: [arg_port, string, { call: [sys.get_arg, 1] }]
+      - if:
+          condition: { and: [{ neq: [arg_port, null] }, { gt: [arg_port.len, 0] }] }
+          then:
+            - set: [port, arg_port]
+      - set: [g_api, { new: museum.api.RepositoryApi }]
+      - decl: [arg_dir, string, { call: [sys.get_arg, 2] }]
+      - if:
+          condition: { and: [{ neq: [arg_dir, null] }, { gt: [arg_dir.len, 0] }] }
+          then:
+            - set: [g_api.data_dir, arg_dir]
+      - call: [io.mkdir_all, "${g_api.data_dir}/exodus"]
+      - call: [g_api.reload_graph]
+
+      - decl: [srv, http_server_handle]
+      - set: [srv, { call: [http.server, "0.0.0.0", port] }]
+      - call: [srv.set_max_body, 1073741824]
+      - call: [srv.set_timeout, 120]
+      - call: [srv.route, "GET", "/api/health", on_health]
+      - call: [srv.route, "GET", "/api/graph", on_graph]
+      - call: [srv.route, "GET", "/api/impact", on_impact]
+      - call: [srv.route, "PUT", "/exodus/:name/:version/exodus.json", on_manifest_put]
+      - call: [srv.route, "GET", "/exodus/:name/:version/exodus.json", on_manifest_get]
+      - call: [srv.route, "PUT", "/exodus/:name/:version/package", on_package_put]
+      - call: [srv.route, "GET", "/exodus/:name/:version/package", on_package_get]
+      - call: [srv.route, "PUT", "/generic/*", on_generic_put]
+      - call: [srv.route, "GET", "/generic/*", on_generic_get]
+      - call: [log.info, "museum listening on :${port}, data in ${g_api.data_dir}"]
+      - call: [srv.start]
+      - return: [0]

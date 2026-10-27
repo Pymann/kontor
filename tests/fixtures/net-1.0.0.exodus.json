@@ -1,0 +1,14 @@
+{
+  "$schema": "exodus.project.config-1.0",
+  "name": "net",
+  "version": "1.0.0",
+  "dependencies": [
+    {
+      "name": "core"
+    }
+  ],
+  "apt_packages": [],
+  "sources": [
+    "src/**/*.cpp"
+  ]
+}

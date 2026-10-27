@@ -1,0 +1,17 @@
+{
+  "$schema": "exodus.project.config-1.0",
+  "name": "zlib-lite",
+  "version": "1.0.0",
+  "dependencies": [],
+  "apt_packages": [
+    {
+      "name": "libc6-dev",
+      "version": "2.39-0ubuntu8.7",
+      "arch": "amd64",
+      "required": true
+    }
+  ],
+  "sources": [
+    "src/**/*.cpp"
+  ]
+}

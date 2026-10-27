@@ -1,0 +1,276 @@
+# museum.api — the repository endpoints. Route handlers in museum.aiml wrap
+# each request in a museum.http.Exchange and call the matching method here.
+
+- namespace: museum.api
+
+- import: "text.aiml"
+- import: "store.aiml"
+- import: "graph.aiml"
+- import: "exchange.aiml"
+
+- class:
+    name: RepositoryApi
+    members:
+      - [data_dir, string, "./data", { access: public }]
+      - [graph, ptr<museum.graph.DependencyGraph>, null, { access: public }]
+    methods:
+      # Rebuilds the dependency graph snapshot from the stored manifests.
+      - def:
+          name: reload_graph
+          body:
+            - decl: [fresh, ptr<museum.graph.DependencyGraph>, { new: museum.graph.DependencyGraph }]
+            - call: [fresh.load, <.data_dir]
+            - set: [<.graph, fresh]
+
+      # ── generic repository ─────────────────────────────────────────────────
+
+      # Artifact path below /generic/, or "" (an error was sent).
+      - def:
+          name: generic_path
+          args: [[xch, ptr<museum.http.Exchange>]]
+          return: string
+          body:
+            - decl: [full, string, { call: [xch.path] }]
+            - decl: [rel, string, { call: [full.substr, 9] }]
+            - if:
+                condition: { eq: [{ call: [museum.text.safe_rel_path, rel] }, 0] }
+                then:
+                  - call: [xch.error, 400, "invalid artifact path"]
+                  - return: [""]
+            - return: [rel]
+
+      - def:
+          name: generic_put
+          args: [[xch, ptr<museum.http.Exchange>]]
+          body:
+            - decl: [rel, string, { call: [<.generic_path, xch] }]
+            - if:
+                condition: { eq: [rel.len, 0] }
+                then:
+                  - return: []
+            - decl: [inreq, http_request_handle, xch.req]
+            - decl: [payload, buffer<u8>]
+            - set: [payload, inreq.body_bytes]
+            - decl: [size, i32, payload.len]
+            - decl: [digest, string, { call: [hash.sha256, payload] }]
+            # Optional end-to-end integrity check, as other repositories offer.
+            - decl: [expected, string, { call: [xch.header, "x-checksum-sha256"] }]
+            - if:
+                condition: { and: [{ gt: [expected.len, 0] }, { neq: [{ call: [expected.lower] }, digest] }] }
+                then:
+                  - call: [xch.error, 400, "checksum mismatch: body sha256 is ${digest}"]
+                  - return: []
+            - decl: [stored, string, { call: [museum.store.put_blob, <.data_dir, payload] }]
+            - if:
+                condition: { eq: [stored.len, 0] }
+                then:
+                  - call: [xch.error, 500, "could not store blob"]
+                  - return: []
+            - call: [museum.store.write_text, <.data_dir, "${<.data_dir}/generic/${rel}", "blob.sha256", stored]
+            - call: [log.info, "generic PUT ${rel} (${size} bytes, ${stored})"]
+            - decl: [rel_json, string, { call: [museum.text.json_str, rel] }]
+            - call: [xch.json, 201, "{\"path\":${rel_json},\"sha256\":\"${stored}\",\"size\":${size}}"]
+
+      - def:
+          name: send_blob
+          args: [[xch, ptr<museum.http.Exchange>], [digest, string]]
+          body:
+            - decl: [blob, string, { call: [museum.store.blob_path, <.data_dir, digest] }]
+            - if:
+                condition: { not: [{ call: [io.exists, blob] }] }
+                then:
+                  - call: [xch.error, 500, "blob ${digest} missing from storage"]
+                  - return: []
+            - call: [xch.set_header, "x-checksum-sha256", digest]
+            - call: [xch.file, blob, "application/octet-stream"]
+
+      - def:
+          name: generic_get
+          args: [[xch, ptr<museum.http.Exchange>]]
+          body:
+            - decl: [rel, string, { call: [<.generic_path, xch] }]
+            - if:
+                condition: { eq: [rel.len, 0] }
+                then:
+                  - return: []
+            - decl: [digest, string, { call: [museum.store.read_text, "${<.data_dir}/generic/${rel}/blob.sha256"] }]
+            - if:
+                condition: { eq: [digest.len, 0] }
+                then:
+                  - call: [xch.error, 404, "not found"]
+                  - return: []
+            - call: [<.send_blob, xch, digest]
+
+      # ── exodus repository ──────────────────────────────────────────────────
+
+      # Validated <name>/<version> directory, or "" (an error was sent).
+      - def:
+          name: project_dir
+          args: [[xch, ptr<museum.http.Exchange>]]
+          return: string
+          body:
+            - decl: [name, string, { call: [xch.param, "name"] }]
+            - decl: [version, string, { call: [xch.param, "version"] }]
+            - decl: [ok_name, i32, { call: [museum.text.safe_segment, name] }]
+            - decl: [ok_version, i32, { call: [museum.text.safe_segment, version] }]
+            - if:
+                condition: { or: [{ eq: [ok_name, 0] }, { eq: [ok_version, 0] }] }
+                then:
+                  - call: [xch.error, 400, "invalid project name or version"]
+                  - return: [""]
+            - return: ["${<.data_dir}/exodus/${name}/${version}"]
+
+      - def:
+          name: manifest_put
+          args: [[xch, ptr<museum.http.Exchange>]]
+          body:
+            - decl: [dir, string, { call: [<.project_dir, xch] }]
+            - if:
+                condition: { eq: [dir.len, 0] }
+                then:
+                  - return: []
+            - decl: [name, string, { call: [xch.param, "name"] }]
+            - decl: [version, string, { call: [xch.param, "version"] }]
+            - decl: [text, string, { call: [xch.text] }]
+            - if:
+                condition: { eq: [text.len, 0] }
+                then:
+                  - call: [xch.error, 400, "empty manifest"]
+                  - return: []
+            - decl: [doc, ptr<yaml_doc>, { call: [yaml.parse, text] }]
+            - decl: [perr, string, { call: [yaml.error, doc] }]
+            - if:
+                condition: { gt: [perr.len, 0] }
+                then:
+                  - call: [yaml.free, doc]
+                  - call: [xch.error, 400, "manifest is not valid JSON: ${perr}"]
+                  - return: []
+            - decl: [root, ptr<yaml_node>, { call: [yaml.root, doc] }]
+            - decl: [m_name, string, { call: [yaml.scalar, { call: [yaml.get, root, "name"] }] }]
+            - decl: [m_version, string, { call: [yaml.scalar, { call: [yaml.get, root, "version"] }] }]
+            - decl: [dep_count, i32, { call: [yaml.size, { call: [yaml.get, root, "dependencies"] }] }]
+            - decl: [apt_count, i32, { call: [yaml.size, { call: [yaml.get, root, "apt_packages"] }] }]
+            - call: [yaml.free, doc]
+            - if:
+                condition: { or: [{ neq: [m_name, name] }, { neq: [m_version, version] }] }
+                then:
+                  - call: [xch.error, 400, "manifest says ${m_name}@${m_version}, URL says ${name}@${version}"]
+                  - return: []
+            - call: [museum.store.write_text, <.data_dir, dir, "exodus.json", text]
+            - call: [<.reload_graph]
+            - call: [log.info, "exodus manifest ${name}@${version} (${dep_count} deps, ${apt_count} apt)"]
+            - decl: [name_json, string, { call: [museum.text.json_str, name] }]
+            - decl: [ver_json, string, { call: [museum.text.json_str, version] }]
+            - call: [xch.json, 201, "{\"name\":${name_json},\"version\":${ver_json},\"dependencies\":${dep_count},\"apt_packages\":${apt_count}}"]
+
+      - def:
+          name: manifest_get
+          args: [[xch, ptr<museum.http.Exchange>]]
+          body:
+            - decl: [dir, string, { call: [<.project_dir, xch] }]
+            - if:
+                condition: { eq: [dir.len, 0] }
+                then:
+                  - return: []
+            - if:
+                condition: { not: [{ call: [io.exists, "${dir}/exodus.json"] }] }
+                then:
+                  - call: [xch.error, 404, "not found"]
+                  - return: []
+            - call: [xch.file, "${dir}/exodus.json", "application/json"]
+
+      # Stores the build output and answers with the rebuild plan for every
+      # dependent — or "unchanged" when the bytes equal the previous version's.
+      - def:
+          name: package_put
+          args: [[xch, ptr<museum.http.Exchange>]]
+          body:
+            - decl: [dir, string, { call: [<.project_dir, xch] }]
+            - if:
+                condition: { eq: [dir.len, 0] }
+                then:
+                  - return: []
+            - decl: [name, string, { call: [xch.param, "name"] }]
+            - decl: [version, string, { call: [xch.param, "version"] }]
+            - if:
+                condition: { not: [{ call: [io.exists, "${dir}/exodus.json"] }] }
+                then:
+                  - call: [xch.error, 409, "upload exodus.json for ${name}@${version} first"]
+                  - return: []
+            - decl: [inreq, http_request_handle, xch.req]
+            - decl: [payload, buffer<u8>]
+            - set: [payload, inreq.body_bytes]
+            - decl: [size, i32, payload.len]
+            - decl: [digest, string, { call: [museum.store.put_blob, <.data_dir, payload] }]
+            - if:
+                condition: { eq: [digest.len, 0] }
+                then:
+                  - call: [xch.error, 500, "could not store blob"]
+                  - return: []
+            - call: [museum.store.write_text, <.data_dir, dir, "package.sha256", digest]
+            - decl: [previous, string, { call: [museum.graph.previous_package_digest, <.data_dir, name, version] }]
+            - decl: [unchanged, string, "false"]
+            - decl: [impact, string, "null"]
+            - if:
+                condition: { eq: [previous, digest] }
+                then:
+                  - set: [unchanged, "true"]
+                else:
+                  - decl: [snapshot, ptr<museum.graph.DependencyGraph>, <.graph]
+                  - set: [impact, { call: [snapshot.impact_json, "project", name, version] }]
+            - call: [log.info, "exodus package ${name}@${version} (${size} bytes, unchanged=${unchanged})"]
+            - decl: [name_json, string, { call: [museum.text.json_str, name] }]
+            - decl: [ver_json, string, { call: [museum.text.json_str, version] }]
+            - call: [xch.json, 201, "{\"name\":${name_json},\"version\":${ver_json},\"sha256\":\"${digest}\",\"size\":${size},\"unchanged\":${unchanged},\"impact\":${impact}}"]
+
+      - def:
+          name: package_get
+          args: [[xch, ptr<museum.http.Exchange>]]
+          body:
+            - decl: [dir, string, { call: [<.project_dir, xch] }]
+            - if:
+                condition: { eq: [dir.len, 0] }
+                then:
+                  - return: []
+            - decl: [digest, string, { call: [museum.store.read_text, "${dir}/package.sha256"] }]
+            - if:
+                condition: { eq: [digest.len, 0] }
+                then:
+                  - call: [xch.error, 404, "not found"]
+                  - return: []
+            - call: [<.send_blob, xch, digest]
+
+      # ── graph API ──────────────────────────────────────────────────────────
+
+      - def:
+          name: graph_view
+          args: [[xch, ptr<museum.http.Exchange>]]
+          body:
+            - decl: [snapshot, ptr<museum.graph.DependencyGraph>, <.graph]
+            - call: [xch.json, 200, { call: [snapshot.graph_json] }]
+
+      - def:
+          name: impact
+          args: [[xch, ptr<museum.http.Exchange>]]
+          body:
+            - decl: [project, string, { call: [xch.query, "project"] }]
+            - decl: [apt, string, { call: [xch.query, "apt"] }]
+            - decl: [version, string, { call: [xch.query, "version"] }]
+            - decl: [snapshot, ptr<museum.graph.DependencyGraph>, <.graph]
+            - if:
+                condition: { gt: [project.len, 0] }
+                then:
+                  - call: [xch.json, 200, { call: [snapshot.impact_json, "project", project, version] }]
+                  - return: []
+            - if:
+                condition: { gt: [apt.len, 0] }
+                then:
+                  - call: [xch.json, 200, { call: [snapshot.impact_json, "apt", apt, version] }]
+                  - return: []
+            - call: [xch.error, 400, "pass ?project=<name> or ?apt=<package>, optionally &version=<v>"]
+
+      - def:
+          name: health
+          args: [[xch, ptr<museum.http.Exchange>]]
+          body:
+            - call: [xch.json, 200, "{\"status\":\"ok\"}"]

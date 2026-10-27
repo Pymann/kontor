@@ -1,0 +1,15 @@
+{
+  "$schema": "exodus.project.config-1.0",
+  "name": "tool",
+  "version": "1.0.0",
+  "dependencies": [
+    {
+      "name": "zlib-lite",
+      "version": "0.9.0"
+    }
+  ],
+  "apt_packages": [],
+  "sources": [
+    "src/**/*.cpp"
+  ]
+}
