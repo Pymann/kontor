@@ -72,11 +72,18 @@ Body (all events): `{"event", "delivery", "timestamp_ms", "museum", "data": {...
 
 | event | `data` |
 |---|---|
-| `package.published` | `{name, version, sha256, size, unchanged, impact}` — `impact` is museum's rebuild plan (`rebuild_waves`, `outdated_pins`, `cycles`) or `null` when unchanged |
+| `package.published` | `{name, version, sha256, size, unchanged, impact}` — `impact` is museum's rebuild plan (`rebuild_count`, `rebuild_waves`, `needs`, `outdated_pins`, `up_to_date`, `cycles`) or `null` when unchanged |
 | `manifest.published` | `{name, version, dependencies, apt_packages}` |
 | `artifact.published` | `{path, sha256, size}` (generic repository) |
 | `image.pushed` | `{repository, tag, digest, media_type, artifact_type}` (includes cosmos layer artifacts) |
 | `ping` | `{}` — sent when a subscription is created or tested |
+
+**Impact plan** (also returned by `GET /api/impact` and the package upload):
+`needs` maps every project in `rebuild_waves` to its **direct** dependencies
+inside the rebuild set, where the trigger project counts as part of the set
+(wave-1 projects list the trigger); `[]` when none.  Example for the fixture
+graph and trigger `zlib-lite`: `{"app":["core","net"],"core":["zlib-lite"],
+"legacy":["core"],"net":["core"]}`.
 
 Delivery: at-least-once, retried with backoff (1 s, 5 s, 30 s, 2 min, 10 min),
 each attempt recorded; receivers must be idempotent on `X-Museum-Delivery`.
@@ -96,6 +103,9 @@ catalog entry).  On `package.published` with a non-null impact:
    instead of opening a second campaign that would rebuild the same projects
    again.
 4. A failed run stops the campaign's dependents (fail closed) and is reported.
+5. A dependent whose rebuilt dependencies (per `needs`) **all** published
+   byte-identical packages (`unchanged: true`) is skipped — nothing it consumes
+   changed.
 
 museum computes *what* depends on what; cosmos decides *when* to run it.
 
