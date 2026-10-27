@@ -1,0 +1,30 @@
+# Expected exit code: 0
+- import: "../lib/b64.aiml"
+
+- def:
+    name: check
+    args: [[label, string], [got, string], [want, string]]
+    return: i32
+    body:
+      - if:
+          condition: { eq: [got, want] }
+          then:
+            - return: [0]
+      - print: ["[FAIL] ${label}: got '${got}' want '${want}'"]
+      - return: [1]
+
+- def:
+    name: main
+    return: i32
+    body:
+      - decl: [fails, i32, 0]
+      - set: [fails, { +: [fails, { call: [check, "user:pass", { call: [museum.b64.decode, "dXNlcjpwYXNz"] }, "user:pass"] }] }]
+      - set: [fails, { +: [fails, { call: [check, "f", { call: [museum.b64.decode, "Zg=="] }, "f"] }] }]
+      - set: [fails, { +: [fails, { call: [check, "fo", { call: [museum.b64.decode, "Zm8="] }, "fo"] }] }]
+      - set: [fails, { +: [fails, { call: [check, "foo", { call: [museum.b64.decode, "Zm9v"] }, "foo"] }] }]
+      - set: [fails, { +: [fails, { call: [check, "foobar", { call: [museum.b64.decode, "Zm9vYmFy"] }, "foobar"] }] }]
+      - set: [fails, { +: [fails, { call: [check, "no pad", { call: [museum.b64.decode, "Zm9vYg"] }, "foob"] }] }]
+      - set: [fails, { +: [fails, { call: [check, "invalid char", { call: [museum.b64.decode, "Zm9v!"] }, ""] }] }]
+      - set: [fails, { +: [fails, { call: [check, "token", { call: [museum.b64.decode, "YWRtaW46MGJhZGM0ZmU="] }, "admin:0badc4fe"] }] }]
+      - print: ["b64 tests failed: ${fails}"]
+      - return: [fails]
