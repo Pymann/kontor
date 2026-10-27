@@ -28,9 +28,9 @@ in the Exodus repo); museum is the cross-project layer.
 
 ## Run
 
-museum needs an aiml build that includes the branches listed under
-[aiml requirements](#aiml-requirements) (merged on `museum/aiml-support` in the
-aiml repo).
+museum targets aiml's **`mem-v3-compiler`** branch (memV3 ownership model,
+spec/61) plus the branches listed under [aiml requirements](#aiml-requirements),
+all merged on `museum/aiml-support-memv3` in the aiml repo.
 
 ```bash
 aiml museum.aiml -- 8081 ./data      # port and data directory (defaults: 8081, ./data)
@@ -117,20 +117,30 @@ path-traversal rejection, rebuild plans, unchanged detection).
 
 ## aiml requirements
 
-Building museum surfaced gaps in aiml; each is fixed on its own branch in the
-aiml repo with tests, and all are merged on `museum/aiml-support`:
+Building museum surfaced gaps in aiml; each is fixed on its own branch off
+`mem-v3-compiler` with tests, and all are merged on `museum/aiml-support-memv3`:
 
 | Branch | Fix |
 |---|---|
-| `feature/io-write-file-buffer` | `io.write_file` accepts `buffer<u8>` (binary-safe) |
-| `feature/http-binary-body` | binary-safe request bodies, `req.body_bytes`, `srv.set_max_body` |
-| `feature/http-resp-body-file` | `resp.body_file` streams files (sendfile, Range, ETag) |
-| `fix/fqn-call-args` | FQN calls into imports pass list/map args by reference, honor try/catch |
-| `fix/fqn-main-composition` | spec/49 §15 recognizes `{ new: ns.Class }` |
-| `fix/namespaced-class-instance` | `<.member` / `<.method` work in classes under `- namespace:` |
-| `fix/same-arg-route-handlers` | `same_arg` exempts `(http_request_handle, http_response_handle)` handlers |
-| `fix/jit-run-with-args` | multi-file programs no longer crash when started with `-- args` |
-| `fix/import-cache-stdout-noise` | no stray `cf83e135…  -` line on stdout |
+| `feature/io-write-file-buffer-memv3` | `io.write_file` accepts `buffer<u8>` (binary-safe) |
+| `feature/http-binary-body-memv3` | binary-safe request bodies, `req.body_bytes`, `srv.set_max_body` |
+| `feature/http-resp-body-file-memv3` | `resp.body_file` streams files (sendfile, Range, ETag) |
+| `fix/http-maps-memv3-handles` | `req.params` / `url.get_param` / `req.cookies` / url parts as memV3 managed handles and strings (heap corruption before) |
+| `fix/fqn-call-args-memv3` | FQN calls into imports pass list/map args correctly, honor try/catch |
+| `fix/fqn-main-composition-memv3` | spec/49 §15 recognizes `{ new: ns.Class }` |
+| `fix/namespaced-class-instance-memv3` | `<.member` / `<.method` work in classes under `- namespace:` |
+| `fix/same-arg-route-handlers-memv3` | `same_arg` exempts `(http_request_handle, http_response_handle)` handlers |
+| `fix/jit-run-with-args-memv3` | multi-file programs no longer crash when started with `-- args` |
+
+### Ownership (memV3)
+
+museum follows spec/61: the route handler owns the `Exchange` (`ptr<…>`) and
+lends it to the API (`ref<…>` parameters); the graph snapshot is read through a
+`ref`, and only `reload_graph` moves a new `ptr` into `RepositoryApi.graph`.
+Passing a `ptr` to a method moves it — the callee frees it at its end.
+
+A full server session (uploads, downloads, range, manifests, packages, impact,
+graph) runs under valgrind with 0 invalid accesses.
 
 ## Limits of the prototype
 
@@ -141,3 +151,7 @@ aiml repo with tests, and all are merged on `museum/aiml-support`:
 - Only the newest version of each project is a graph node.
 - Rebuild plans are returned, not yet sent to a CI system (webhooks are the
   obvious next step).
+- aiml memV3 does not yet release strings returned by builtin getters
+  (`req.path`, `req.body`, `req.header`) when they are passed on as
+  temporaries: a few hundred bytes per request leak (valgrind: ~4 KB for a
+  full test session). A compiler-side drop gap, not museum logic.

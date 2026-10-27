@@ -25,7 +25,7 @@
 - decl: [g_api, ptr<museum.api.RepositoryApi>]
 
 # Route handlers: srv.route needs free functions, so each one wraps the
-# request in an Exchange and hands it to the RepositoryApi.
+# request in an Exchange (owned here) and lends it to the RepositoryApi.
 
 - def:
     name: wrap
@@ -41,55 +41,64 @@
     name: on_health
     args: [[req, http_request_handle], [resp, http_response_handle]]
     body:
-      - call: [g_api.health, { call: [wrap, req, resp] }]
+      - decl: [xch, ptr<museum.http.Exchange>, { call: [wrap, req, resp] }]
+      - call: [g_api.health, xch]
 
 - def:
     name: on_graph
     args: [[req, http_request_handle], [resp, http_response_handle]]
     body:
-      - call: [g_api.graph_view, { call: [wrap, req, resp] }]
+      - decl: [xch, ptr<museum.http.Exchange>, { call: [wrap, req, resp] }]
+      - call: [g_api.graph_view, xch]
 
 - def:
     name: on_impact
     args: [[req, http_request_handle], [resp, http_response_handle]]
     body:
-      - call: [g_api.impact, { call: [wrap, req, resp] }]
+      - decl: [xch, ptr<museum.http.Exchange>, { call: [wrap, req, resp] }]
+      - call: [g_api.impact, xch]
 
 - def:
     name: on_manifest_put
     args: [[req, http_request_handle], [resp, http_response_handle]]
     body:
-      - call: [g_api.manifest_put, { call: [wrap, req, resp] }]
+      - decl: [xch, ptr<museum.http.Exchange>, { call: [wrap, req, resp] }]
+      - call: [g_api.manifest_put, xch]
 
 - def:
     name: on_manifest_get
     args: [[req, http_request_handle], [resp, http_response_handle]]
     body:
-      - call: [g_api.manifest_get, { call: [wrap, req, resp] }]
+      - decl: [xch, ptr<museum.http.Exchange>, { call: [wrap, req, resp] }]
+      - call: [g_api.manifest_get, xch]
 
 - def:
     name: on_package_put
     args: [[req, http_request_handle], [resp, http_response_handle]]
     body:
-      - call: [g_api.package_put, { call: [wrap, req, resp] }]
+      - decl: [xch, ptr<museum.http.Exchange>, { call: [wrap, req, resp] }]
+      - call: [g_api.package_put, xch]
 
 - def:
     name: on_package_get
     args: [[req, http_request_handle], [resp, http_response_handle]]
     body:
-      - call: [g_api.package_get, { call: [wrap, req, resp] }]
+      - decl: [xch, ptr<museum.http.Exchange>, { call: [wrap, req, resp] }]
+      - call: [g_api.package_get, xch]
 
 - def:
     name: on_generic_put
     args: [[req, http_request_handle], [resp, http_response_handle]]
     body:
-      - call: [g_api.generic_put, { call: [wrap, req, resp] }]
+      - decl: [xch, ptr<museum.http.Exchange>, { call: [wrap, req, resp] }]
+      - call: [g_api.generic_put, xch]
 
 - def:
     name: on_generic_get
     args: [[req, http_request_handle], [resp, http_response_handle]]
     body:
-      - call: [g_api.generic_get, { call: [wrap, req, resp] }]
+      - decl: [xch, ptr<museum.http.Exchange>, { call: [wrap, req, resp] }]
+      - call: [g_api.generic_get, xch]
 
 - def:
     name: main
