@@ -122,7 +122,20 @@ Both programs accept the same three identity sources, configured separately:
   and issuer are checked.
 
 Authorization is by **roles**, each a list of allowed actions (cosmos spec
-100 F100-11).  Groups from LDAP / SAML attributes map to roles in config.
+100 F100-11).  Groups from LDAP / SAML attributes map to roles in config
+(museum: `auth.group_roles`; cosmos: `grant: { group: … }`).  For a group
+value that is a DN, its first RDN value counts too (`cn=devs,…` → `devs`).
+
+Both use the aiml identity builtins (aiml spec/67) and the same rules: local
+accounts are asked first (break-glass admin), user input is escaped before it
+reaches a DN or filter, an empty password never reaches the directory, and a
+SAML response counts only for an AuthnRequest the program issued itself —
+once, within 10 minutes.  Both expose the SAML endpoints at the same paths:
+`GET /api/v1/sso/saml/login?relay=/path` (302 to the IdP) and
+`POST /api/v1/sso/saml/acs` (POST binding).  On success a `RelayState` that is
+a local path (`/…`, not `//…`) gets a 302 with `#token=<session>`, anything
+else gets JSON.  museum's SAML session is an API token with an expiry
+(`session_hours`); cosmos issues its normal session token.
 
 Machine access (CI, docker, cosmos ⇄ museum) uses **API tokens**: random
 256-bit secrets, stored only as sha256, revocable, scoped to roles.
@@ -141,6 +154,7 @@ Exception: museum's `/v2/` registry answers with the OCI error format
 `{"errors":[{"code","message"}]}` that OCI clients expect.
 
 museum's endpoints (implemented, see museum README): `/api/v1/whoami`,
+`/api/v1/sso/saml/login`, `/api/v1/sso/saml/acs`,
 `/api/v1/tokens` (POST/GET, DELETE `/<id>`), `/api/v1/users` (admin),
 `/api/v1/webhooks` (POST/GET, DELETE `/<id>`, POST `/<id>/test`,
 GET `/<id>/deliveries`, POST `/<id>/deliveries/<delivery>/redeliver`),
