@@ -94,3 +94,66 @@
                   - set: [idx, { +: [idx, 1] }]
       - call: [names.sort]
       - return: [names]
+
+# Names of the regular files directly in a directory (sorted).
+- def:
+    name: list_files
+    args: [[dir_path, string]]
+    return: list<string>
+    body:
+      - decl: [names, list<string>]
+      - if:
+          condition: { call: [io.is_dir, dir_path] }
+          then:
+            - decl: [entries, list<path>, { call: [io.list_dir, dir_path] }]
+            - decl: [idx, i32, 0]
+            - while:
+                condition: { lt: [idx, entries.len] }
+                body:
+                  - decl: [entry, path, { call: [entries.get, idx] }]
+                  - decl: [entry_name, string, { call: [entry.name] }]
+                  - if:
+                      condition: { call: [io.is_file, "${dir_path}/${entry_name}"] }
+                      then:
+                        - call: [names.push, entry_name]
+                  - set: [idx, { +: [idx, 1] }]
+      - call: [names.sort]
+      - return: [names]
+
+# Adopts the file `src` as a blob: hashes it while streaming (no size limit in
+# memory), moves it into cas/ — or drops it when the blob already exists.
+# Returns the sha256, or "" on error.  `src` is consumed either way.
+- def:
+    name: put_blob_file
+    args: [[data_dir, string], [src, string]]
+    return: string
+    body:
+      - if:
+          condition: { not: [{ call: [io.exists, src] }] }
+          then:
+            - return: [""]
+      - decl: [digest, string, { call: [hash.sha256_file, src] }]
+      - if:
+          condition: { neq: [digest.len, 64] }
+          then:
+            - call: [io.remove, src]
+            - return: [""]
+      - decl: [final_path, string, { call: [museum.store.blob_path, data_dir, digest] }]
+      - if:
+          condition: { call: [io.exists, final_path] }
+          then:
+            - call: [io.remove, src]
+            - return: [digest]
+      - decl: [shard, string, { call: [digest.substr, 0, 2] }]
+      - call: [io.mkdir_all, "${data_dir}/cas/${shard}"]
+      - call: [io.rename, src, final_path]
+      - return: [digest]
+
+# A fresh temp path below <data>/tmp (the directory is created).
+- def:
+    name: temp_path
+    args: [[data_dir, string], [prefix, string]]
+    return: string
+    body:
+      - call: [io.mkdir_all, "${data_dir}/tmp"]
+      - return: ["${data_dir}/tmp/${prefix}-${{ call: [math.random_hex, 8] }}"]

@@ -4,6 +4,19 @@
 
 - import: "text.aiml"
 
+# Machine-readable error code for an HTTP status (JSON errors {"error","code"}).
+- def:
+    name: error_code
+    args: [[status, i32]]
+    return: string
+    body:
+      - decl: [codes, map<i32:string>, { 400: "bad_request", 401: "unauthorized", 403: "forbidden", 404: "not_found", 405: "method_not_allowed", 409: "conflict", 413: "too_large", 416: "range_invalid", 422: "invalid", 500: "internal", 501: "not_implemented", 507: "insufficient_storage" }]
+      - if:
+          condition: { eq: [{ call: [codes.contains, status] }, 1] }
+          then:
+            - return: [{ call: [codes.get, status] }]
+      - return: ["error"]
+
 - class:
     name: Exchange
     members:
@@ -61,18 +74,65 @@
             - decl: [inreq, http_request_handle, <.req]
             - return: [inreq.path]
 
-      # Body as text ("" when empty).
+      # Body as text ("" when empty).  A spooled body (srv.set_spool) is read
+      # from its temp file.
       - def:
           name: text
           return: string
           body:
             - decl: [inreq, http_request_handle, <.req]
+            - decl: [spooled, string, inreq.body_path]
+            - if:
+                condition: { neq: [spooled, null] }
+                then:
+                  - return: [{ call: [io.read_file, spooled] }]
             - decl: [val, string, inreq.body]
             - if:
                 condition: { eq: [val, null] }
                 then:
                   - return: [""]
             - return: [val]
+
+      # Exact body length in bytes.
+      - def:
+          name: body_len
+          return: i64
+          body:
+            - decl: [inreq, http_request_handle, <.req]
+            - return: [inreq.body_len]
+
+      # The body as a file: the spooled temp file is moved to `dest`, an
+      # in-memory body is written there (binary-safe).  Returns 0 on success.
+      # An empty body creates an empty file.
+      - def:
+          name: body_to_file
+          args: [[dest, string]]
+          return: i32
+          body:
+            - decl: [inreq, http_request_handle, <.req]
+            - decl: [spooled, string, inreq.body_path]
+            - if:
+                condition: { neq: [spooled, null] }
+                then:
+                  - call: [io.rename, spooled, dest]
+                  - if:
+                      condition: { call: [io.exists, dest] }
+                      then:
+                        - return: [0]
+                  - return: [-1]
+            - decl: [payload, buffer<u8>]
+            - set: [payload, inreq.body_bytes]
+            - return: [{ call: [io.write_file, dest, payload] }]
+
+      # Status with an empty body (202/204/201 of the registry protocol).
+      - def:
+          name: empty
+          args: [[status, i32]]
+          body:
+            - decl: [out, http_response_handle, <.resp]
+            - set: [out.status, status]
+            - set: [out.body, ""]
+            - call: [out.send]
 
       - def:
           name: json
@@ -89,7 +149,8 @@
           args: [[status, i32], [message, string]]
           body:
             - decl: [msg_json, string, { call: [museum.text.json_str, message] }]
-            - call: [<.json, status, "{\"error\":${msg_json}}"]
+            - decl: [code, string, { call: [museum.http.error_code, status] }]
+            - call: [<.json, status, "{\"error\":${msg_json},\"code\":\"${code}\"}"]
 
       # Streams a file (Range-aware) with the given content type.
       - def:
