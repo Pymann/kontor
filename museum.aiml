@@ -117,6 +117,24 @@
       - call: [g_lock.release]
 
 - def:
+    name: on_sso_login
+    args: [[req, http_request_handle], [resp, http_response_handle]]
+    body:
+      - call: [g_lock.acquire]
+      - decl: [xch, ptr<museum.http.Exchange>, { call: [wrap, req, resp] }]
+      - call: [g_api.sso_login, xch]
+      - call: [g_lock.release]
+
+- def:
+    name: on_sso_acs
+    args: [[req, http_request_handle], [resp, http_response_handle]]
+    body:
+      - call: [g_lock.acquire]
+      - decl: [xch, ptr<museum.http.Exchange>, { call: [wrap, req, resp] }]
+      - call: [g_api.sso_acs, xch]
+      - call: [g_lock.release]
+
+- def:
     name: on_whoami
     args: [[req, http_request_handle], [resp, http_response_handle]]
     body:
@@ -444,6 +462,8 @@
       - call: [srv.route, "PUT", "/api/v1/generic/*", on_generic_put]
       - call: [srv.route, "GET", "/api/v1/generic/*", on_generic_get]
       - call: [srv.route, "GET", "/api/v1/whoami", on_whoami]
+      - call: [srv.route, "GET", "/api/v1/sso/saml/login", on_sso_login]
+      - call: [srv.route, "POST", "/api/v1/sso/saml/acs", on_sso_acs]
       - call: [srv.route, "POST", "/api/v1/tokens", on_token_create]
       - call: [srv.route, "GET", "/api/v1/tokens", on_token_list]
       - call: [srv.route, "DELETE", "/api/v1/tokens/:id", on_token_revoke]

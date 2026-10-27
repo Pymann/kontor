@@ -11,4 +11,5 @@ for t in tests/test_*.aiml; do
 done
 AIML_BIN="$AIML_BIN" tests/e2e.sh || FAILS=$((FAILS + 1))
 AIML_BIN="$AIML_BIN" tests/ecosystem.sh || FAILS=$((FAILS + 1))
+AIML_BIN="$AIML_BIN" tests/identity.sh || FAILS=$((FAILS + 1))
 exit $FAILS

@@ -168,3 +168,31 @@
           body:
             - decl: [out, http_response_handle, <.resp]
             - call: [out.headers.put, key, val]
+
+      # 302 to `target` (no body, not cached).
+      - def:
+          name: redirect
+          args: [[target, string]]
+          body:
+            - decl: [out, http_response_handle, <.resp]
+            - call: [out.headers.put, "location", target]
+            - call: [out.headers.put, "cache-control", "no-store"]
+            - set: [out.status, 302]
+            - set: [out.body, ""]
+            - call: [out.send]
+
+      # One field of an application/x-www-form-urlencoded body (the SAML POST
+      # binding); the URL parser does the percent-decoding.
+      - def:
+          name: form
+          args: [[key, string]]
+          return: string
+          body:
+            - decl: [raw, string, { call: [<.text] }]
+            - decl: [furl, url, { call: [http.parse_url, "http://form.invalid/?${raw}"] }]
+            - decl: [val, string, { call: [furl.get_param.get, key] }]
+            - if:
+                condition: { eq: [val, null] }
+                then:
+                  - return: [""]
+            - return: [val]

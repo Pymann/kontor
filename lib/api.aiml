@@ -415,6 +415,74 @@
                   - return: []
             - call: [xch.json, 200, "{\"name\":${{ call: [museum.text.json_str, who.name] }},\"kind\":\"${who.kind}\",\"roles\":${{ call: [museum.auth.csv_json, who.roles] }}}"]
 
+      # ── SAML single sign-on (contract §6) ─────────────────────────────────
+      # GET /api/v1/sso/saml/login?relay=/path → 302 to the IdP.
+      - def:
+          name: sso_login
+          args: [[xch, ref<museum.http.Exchange>]]
+          body:
+            - if:
+                condition: { eq: [<.acl.use_saml, 0] }
+                then:
+                  - call: [xch.error, 404, "saml is not configured"]
+                  - return: []
+            - decl: [target, string, { call: [<.acl.idp.saml_begin, { call: [xch.query, "relay"] }] }]
+            - call: [xch.redirect, target]
+
+      # POST /api/v1/sso/saml/acs (SAMLResponse, RelayState) → a session token
+      # (an expiring API token with the user's roles).  With a RelayState that
+      # is a path of this service ("/…", not "//…") the answer is a 302 there
+      # with "#token=<id>:<secret>" (fragments reach no server); otherwise JSON.
+      - def:
+          name: sso_acs
+          args: [[xch, ref<museum.http.Exchange>]]
+          body:
+            - if:
+                condition: { eq: [<.acl.use_saml, 0] }
+                then:
+                  - call: [xch.error, 404, "saml is not configured"]
+                  - return: []
+            - decl: [answer, string, { call: [xch.form, "SAMLResponse"] }]
+            - decl: [relay, string, { call: [xch.form, "RelayState"] }]
+            - if:
+                condition: { eq: [answer.len, 0] }
+                then:
+                  - call: [xch.error, 400, "SAMLResponse missing"]
+                  - return: []
+            - decl: [ident, museum.identity.Identity, { call: [<.acl.idp.saml_finish, answer] }]
+            - if:
+                condition: { eq: [ident.valid, 0] }
+                then:
+                  - call: [log.warn, "saml response rejected: ${ident.error}"]
+                  - call: [xch.error, 401, "saml: ${ident.error}"]
+                  - return: []
+            - if:
+                condition: { eq: [{ call: [museum.auth.valid_name, ident.name] }, 0] }
+                then:
+                  - call: [xch.error, 401, "saml: NameID is not a valid museum user name"]
+                  - return: []
+            - decl: [who, museum.auth.Principal, { call: [<.acl.external_principal, ident] }]
+            - decl: [minted, string, { call: [<.acl.create_session_token, who.name, who.roles, <.acl.idp.saml_session_hours] }]
+            - call: [log.info, "saml login ${who.name} (roles ${who.roles})"]
+            - decl: [local, i32, 0]
+            - if:
+                condition: { and: [{ eq: [{ call: [relay.starts_with, "/"] }, 1] }, { eq: [{ call: [relay.starts_with, "//"] }, 0] }] }
+                then:
+                  - set: [local, 1]
+            - if:
+                condition: { ge: [{ call: [relay.index_of, "\\"] }, 0] }
+                then:
+                  - set: [local, 0]
+            - if:
+                condition: { eq: [local, 1] }
+                then:
+                  - call: [xch.redirect, "${relay}#token=${minted}"]
+                  - return: []
+            - decl: [colon, i32, { call: [minted.index_of, ":"] }]
+            - decl: [tok_id, string, { call: [minted.substr, 0, colon] }]
+            - decl: [secret, string, { call: [minted.substr, { +: [colon, 1] }] }]
+            - call: [xch.json, 200, "{\"name\":${{ call: [museum.text.json_str, who.name] }},\"roles\":${{ call: [museum.auth.csv_json, who.roles] }},\"id\":\"${tok_id}\",\"token\":\"${secret}\"}"]
+
       # Body field as comma list: JSON array or comma string.
       - def:
           name: body_csv

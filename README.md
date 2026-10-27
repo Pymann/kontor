@@ -29,8 +29,9 @@ in the Exodus repo); museum is the cross-project layer.
 ## Run
 
 museum targets aiml's **`mem-v3-compiler`** branch (memV3 ownership model,
-spec/61) plus the branches listed under [aiml requirements](#aiml-requirements),
-all merged on `museum/aiml-support-memv3` in the aiml repo.
+spec/61) plus the branches listed under [aiml requirements](#aiml-requirements).
+`ecosystem/integration-memv3` in the aiml repo is `mem-v3-compiler` with all of
+them merged; museum (and cosmos) pass their tests on it.
 
 ```bash
 aiml museum.aiml -- 8081 ./data      # port and data directory (defaults: 8081, ./data)
@@ -84,9 +85,23 @@ exists under `/api/v1/…`; `/generic/…` and `/exodus/…` have `/api/v1/` ali
 - **Bootstrap**: `--admin-token-file <path>` or `MUSEUM_ADMIN_TOKEN` (≥32
   characters) installs an admin token with id `bootstrap` and owner `admin`.
   The secret is never logged.
-- **LDAP / SAML**: `auth.identity_sources` is the seam — `authenticate()`
-  asks each configured source in order. Today only `local` exists; naming
-  `ldap` or `saml` is a startup error until the aiml ldap/saml builtins land.
+- **LDAP** (`identity_sources: [local, ldap]`): HTTP Basic `user:password`
+  is checked locally first (break-glass admin), then against the directory —
+  DN template (`user_dn: "uid={user},…"`) or search-then-bind
+  (`search_base` + `search_filter`, service account `bind_dn` +
+  `bind_password_file`).  Input goes through `ldap.escape_dn` /
+  `ldap.escape_filter`; an empty password never reaches the directory.
+- **SAML 2.0** (`identity_sources: [..., saml]`): `GET /api/v1/sso/saml/login?relay=/path`
+  redirects to the IdP; `POST /api/v1/sso/saml/acs` verifies the signed
+  response (only for a request museum issued, once, ≤10 min; optional issuer
+  check) and mints a **session token** — an API token with `expires_ms`
+  (`session_hours`, default 12).  A local `RelayState` gets a 302 with
+  `#token=<id>:<secret>`, anything else gets JSON.
+- **Groups → roles**: `auth.group_roles` maps directory/IdP groups (for a DN
+  value also its first RDN, `cn=devs,…` → `devs`) to roles; every LDAP/SAML
+  user also gets `auth.default_role` (default `reader`, `none` = groups only).
+- Needs an aiml with the identity builtins (aiml spec/67, branch
+  `feature/identity-builtins-memv3`).
 
 `data/museum.yaml` (optional):
 
@@ -94,7 +109,11 @@ exists under `/api/v1/…`; `/generic/…` and `/exodus/…` have `/api/v1/` ali
 public_url: https://museum.example.com   # used in webhook payloads ("museum")
 auth:
   anonymous: reader                      # role for anonymous requests, or "none"
-  identity_sources: [local]              # later: [local, ldap, saml]
+  identity_sources: [local]              # or [local, ldap, saml]
+  # default_role: reader                 # every LDAP/SAML user
+  # group_roles: { devs: writer }        # directory/IdP group → role
+  # ldap: { url: "ldap://dir:389", user_dn: "uid={user},ou=people,dc=example,dc=org", group_attr: memberOf }
+  # saml: { idp_sso_url: …, idp_cert_file: …, sp_entity_id: …, acs_url: …, idp_entity_id: …, group_attr: groups }
   roles:                                 # added to / overriding the built-ins
     ci: [read, write]
     hooks: [read, webhook_admin]
@@ -198,7 +217,7 @@ leaves a half-written record; restarting museum resumes queued deliveries.
 | `lib/graph.aiml` | `museum.graph.DependencyGraph` — graph snapshot, rebuild planning |
 | `lib/exchange.aiml` | `museum.http.Exchange` — request/response helpers, JSON errors |
 | `lib/auth.aiml` | `museum.auth.AccessControl` — roles, users, tokens, authentication |
-| `lib/b64.aiml` | base64 decoding for Basic auth (stopgap until aiml's `base64.decode`) |
+| `lib/identity.aiml` | `museum.identity.IdentitySources` — LDAP and SAML on the aiml identity builtins |
 | `lib/oci.aiml` | `museum.oci.Registry` — OCI Distribution v1.1 |
 | `lib/hooks.aiml` | `museum.hooks.WebhookHub` — subscriptions, queue, signed delivery |
 | `lib/store.aiml` | content-addressed storage, atomic small files |
@@ -222,7 +241,8 @@ signature-verifying receivers (one fails twice, then accepts).
 ## aiml requirements
 
 Building museum surfaced gaps in aiml; each is fixed on its own branch off
-`mem-v3-compiler` with tests, and all are merged on `museum/aiml-support-memv3`:
+`mem-v3-compiler` with tests (the first nine are already merged into
+`mem-v3-compiler`):
 
 | Branch | Fix |
 |---|---|
@@ -235,7 +255,9 @@ Building museum surfaced gaps in aiml; each is fixed on its own branch off
 | `fix/namespaced-class-instance-memv3` | `<.member` / `<.method` work in classes under `- namespace:` |
 | `fix/same-arg-route-handlers-memv3` | `same_arg` exempts `(http_request_handle, http_response_handle)` handlers |
 | `fix/jit-run-with-args-memv3` | multi-file programs no longer crash when started with `-- args` |
-| `feature/http-registry-support-memv3` | chunked request bodies, spooling bodies to temp files (`srv.set_spool`, `req.body_path`, `req.body_len`), `HEAD` without body, `io.append_from` (needed for the registry; not yet on `museum/aiml-support-memv3`) |
+| `feature/http-registry-support-memv3` | chunked request bodies, spooling bodies to temp files (`srv.set_spool`, `req.body_path`, `req.body_len`), `HEAD` without body, `io.append_from`, `connection: close` (needed for the registry) |
+| `feature/identity-builtins-memv3` | `base64.*`, `ldap.*`, `saml.*` (aiml spec/67) — Basic auth, LDAP and SAML logins |
+| `feature/http-client-files-memv3` | binary-safe http client (`client.body_file`, `resp.save_to`, `resp.body_len`), HEAD responses without body — used by cosmos to push/pull images |
 
 ### Ownership (memV3)
 
@@ -252,7 +274,6 @@ graph) runs under valgrind with 0 invalid accesses.
 - One lock serializes all request handlers (aiml's server runs one thread per
   connection); webhook delivery runs on its own thread outside it.
 - Only the newest version of each project is a graph node.
-- LDAP and SAML are configuration seams only (see [Auth](#auth)).
-- Basic auth decoding is a museum-side stopgap that accepts printable ASCII
-  credentials only, until aiml's `base64.decode` builtin is available.
+- LDAP is asked on every Basic-authenticated request (no cache); SAML session
+  tokens expire, but expired token files are not swept.
 - No garbage collection of unreferenced blobs after manifest deletes.
