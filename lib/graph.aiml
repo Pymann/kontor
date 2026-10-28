@@ -362,13 +362,60 @@
                         - call: [waiting.clear]
                         - call: [waiting.extend, blocked]
 
+            # needs: for every project that got a wave, its DIRECT dependencies
+            # inside the rebuild set — the trigger project counts as part of the
+            # set, so wave-1 projects list it.  A consumer (cosmos) can then skip
+            # a dependent whose rebuilt dependencies all came out unchanged.
+            - decl: [scope, list<string>]
+            - call: [scope.extend, affected]
+            - if:
+                condition: { eq: [is_apt, 0] }
+                then:
+                  - call: [scope.push, name]
+            - decl: [waved, list<string>]
+            - call: [waved.extend, affected]
+            - call: [waved.sort]
+            - decl: [needs, string, ""]
+            - decl: [nidx, i32, 0]
+            - while:
+                condition: { lt: [nidx, waved.len] }
+                body:
+                  - decl: [proj, string, { call: [waved.get, nidx] }]
+                  - if:
+                      condition: { eq: [{ call: [cycle.contains, proj] }, 0] }
+                      then:
+                        - decl: [proj_edges, string, { call: [<.deps.get, proj] }]
+                        - decl: [direct, list<string>]
+                        - decl: [sidx, i32, 0]
+                        - while:
+                            condition: { lt: [sidx, scope.len] }
+                            body:
+                              - decl: [dep, string, { call: [scope.get, sidx] }]
+                              - if:
+                                  condition: { neq: [dep, proj] }
+                                  then:
+                                    - if:
+                                        condition: { eq: [{ call: [museum.graph.is_absent, { call: [museum.graph.edge_spec, proj_edges, dep] }] }, 0] }
+                                        then:
+                                          - call: [direct.push, dep]
+                              - set: [sidx, { +: [sidx, 1] }]
+                        - call: [direct.sort]
+                        - decl: [proj_json, string, { call: [museum.text.json_str, proj] }]
+                        - decl: [direct_json, string, { call: [museum.text.json_list, direct] }]
+                        - if:
+                            condition: { gt: [needs.len, 0] }
+                            then:
+                              - set: [needs, "${needs},"]
+                        - set: [needs, "${needs}${proj_json}:${direct_json}"]
+                  - set: [nidx, { +: [nidx, 1] }]
+
             - decl: [kind_json, string, { call: [museum.text.json_str, kind] }]
             - decl: [name_json, string, { call: [museum.text.json_str, name] }]
             - decl: [version_json, string, { call: [museum.text.json_str, version] }]
             - decl: [cycle_json, string, { call: [museum.text.json_list, cycle] }]
             - decl: [current_json, string, { call: [museum.text.json_list, up_to_date] }]
             - decl: [total, i32, affected.len]
-            - return: ["{\"trigger\":{\"kind\":${kind_json},\"name\":${name_json},\"version\":${version_json}},\"rebuild_count\":${total},\"rebuild_waves\":[${waves}],\"outdated_pins\":[${outdated}],\"up_to_date\":${current_json},\"cycles\":${cycle_json}}"]
+            - return: ["{\"trigger\":{\"kind\":${kind_json},\"name\":${name_json},\"version\":${version_json}},\"rebuild_count\":${total},\"rebuild_waves\":[${waves}],\"outdated_pins\":[${outdated}],\"up_to_date\":${current_json},\"cycles\":${cycle_json},\"needs\":{${needs}}}"]
 
       # Whole graph as JSON: nodes with their newest version and both edge kinds.
 

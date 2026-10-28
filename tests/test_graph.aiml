@@ -43,6 +43,9 @@
       - set: [fails, { +: [fails, { call: [expect_contains, "project waves", plan, "\"rebuild_waves\":[[\"core\"],[\"legacy\",\"net\"],[\"app\"]]"] }] }]
       - set: [fails, { +: [fails, { call: [expect_contains, "pinned consumer", plan, "{\"project\":\"tool\",\"pins\":\"0.9.0\"}"] }] }]
       - set: [fails, { +: [fails, { call: [expect_contains, "count", plan, "\"rebuild_count\":4"] }] }]
+      - set: [fails, { +: [fails, { call: [expect_contains, "needs app", plan, "\"app\":[\"core\",\"net\"]"] }] }]
+      - set: [fails, { +: [fails, { call: [expect_contains, "needs core", plan, "\"core\":[\"zlib-lite\"]"] }] }]
+      - set: [fails, { +: [fails, { call: [expect_contains, "needs net", plan, "\"net\":[\"core\"]"] }] }]
 
       - decl: [leaf, string, { call: [graph.impact_json, "project", "app", "2.0.1"] }]
       - set: [fails, { +: [fails, { call: [expect_contains, "leaf", leaf, "\"rebuild_waves\":[]"] }] }]
@@ -52,6 +55,7 @@
       - decl: [apt_same, string, { call: [graph.impact_json, "apt", "libssl-dev", "3.0.13-0ubuntu3.7"] }]
       - set: [fails, { +: [fails, { call: [expect_contains, "apt pinned same", apt_same, "\"up_to_date\":[\"core\"]"] }] }]
       - set: [fails, { +: [fails, { call: [expect_contains, "apt pinned same count", apt_same, "\"rebuild_count\":0"] }] }]
+      - set: [fails, { +: [fails, { call: [expect_contains, "apt needs core", apt_new, "\"core\":[]"] }] }]
 
       - decl: [graph_out, string, { call: [graph.graph_json] }]
       - set: [fails, { +: [fails, { call: [expect_contains, "newest version", graph_out, "{\"name\":\"legacy\",\"version\":\"1.0.0\""] }] }]

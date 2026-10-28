@@ -1,0 +1,98 @@
+# Expected exit code: 0
+# Access control: users, tokens, roles, Authorization header parsing.
+- import: "../lib/auth.aiml"
+
+- def:
+    name: check
+    args: [[label, string], [got, i32], [want, i32]]
+    return: i32
+    body:
+      - if:
+          condition: { eq: [got, want] }
+          then:
+            - return: [0]
+      - print: ["[FAIL] ${label}: got ${got} want ${want}"]
+      - return: [1]
+
+- def:
+    name: main
+    return: i32
+    body:
+      - decl: [data_dir, string, "/tmp/museum_auth_test"]
+      - call: [io.remove_all, data_dir]
+      - call: [io.mkdir_all, data_dir]
+      - call: [io.write_file, "${data_dir}/museum.yaml", "auth:\n  anonymous: none\n  identity_sources: [local]\nroles:\n  ci: [read, write]\n"]
+      - decl: [acl, ptr<museum.auth.AccessControl>, { new: museum.auth.AccessControl }]
+      - set: [acl.data_dir, data_dir]
+      - set: [acl.pbkdf2_iterations, 1000]
+      - decl: [fails, i32, 0]
+      - set: [fails, { +: [fails, { call: [check, "config ok", { call: [acl.load_config, "${data_dir}/museum.yaml"] }, 1] }] }]
+      - set: [fails, { +: [fails, { call: [check, "ci role write", { call: [acl.allows, "ci", "write"] }, 1] }] }]
+      - set: [fails, { +: [fails, { call: [check, "ci role no delete", { call: [acl.allows, "ci", "delete"] }, 0] }] }]
+      - set: [fails, { +: [fails, { call: [check, "admin everything", { call: [acl.allows, "admin", "webhook_admin"] }, 1] }] }]
+      - set: [fails, { +: [fails, { call: [check, "within: ci ⊆ maintainer", { call: [acl.roles_within, "ci", "maintainer"] }, 1] }] }]
+      - set: [fails, { +: [fails, { call: [check, "within: maintainer ⊄ ci", { call: [acl.roles_within, "maintainer", "ci"] }, 0] }] }]
+      - set: [fails, { +: [fails, { call: [check, "within: admin ⊄ maintainer", { call: [acl.roles_within, "admin", "maintainer"] }, 0] }] }]
+
+      # anonymous disabled by config
+      - decl: [anon, museum.auth.Principal, { call: [acl.authenticate, ""] }]
+      - set: [fails, { +: [fails, { call: [check, "anonymous none", anon.valid, 0] }] }]
+
+      # users
+      - decl: [perr, string, { call: [acl.put_user, "alice", "correct-horse", "ci"] }]
+      - set: [fails, { +: [fails, { call: [check, "put_user ok", perr.len, 0] }] }]
+      - decl: [bad_name, string, { call: [acl.put_user, "../x", "correct-horse", "ci"] }]
+      - set: [fails, { +: [fails, { call: [check, "bad name rejected", { call: [museum.auth.valid_name, "../x"] }, 0] }] }]
+      - decl: [short_pw, string, { call: [acl.put_user, "bob", "short", "ci"] }]
+      - set: [fails, { +: [fails, { call: [check, "short password rejected", { call: [short_pw.starts_with, "password must"] }, 1] }] }]
+      # Basic alice:correct-horse = YWxpY2U6Y29ycmVjdC1ob3JzZQ==
+      - decl: [by_pw, museum.auth.Principal, { call: [acl.authenticate, "Basic YWxpY2U6Y29ycmVjdC1ob3JzZQ=="] }]
+      - set: [fails, { +: [fails, { call: [check, "basic password ok", by_pw.valid, 1] }] }]
+      - set: [fails, { +: [fails, { call: [check, "basic roles", { call: [acl.allows, by_pw.roles, "write"] }, 1] }] }]
+      # alice:wrong-horse
+      - decl: [by_bad, museum.auth.Principal, { call: [acl.authenticate, "Basic YWxpY2U6d3JvbmctaG9yc2U="] }]
+      - set: [fails, { +: [fails, { call: [check, "basic wrong password", by_bad.valid, 0] }] }]
+      - decl: [garbage, museum.auth.Principal, { call: [acl.authenticate, "Basic !!!"] }]
+      - set: [fails, { +: [fails, { call: [check, "basic garbage", garbage.valid, 0] }] }]
+
+      # tokens
+      - decl: [minted, string, { call: [acl.create_token, "alice", "ci token", "reader"] }]
+      - decl: [colon, i32, { call: [minted.index_of, ":"] }]
+      - decl: [tok_id, string, { call: [minted.substr, 0, colon] }]
+      - decl: [secret, string, { call: [minted.substr, { +: [colon, 1] }] }]
+      - set: [fails, { +: [fails, { call: [check, "secret is 256 bit", secret.len, 64] }] }]
+      - decl: [by_tok, museum.auth.Principal, { call: [acl.authenticate, "Bearer ${secret}"] }]
+      - set: [fails, { +: [fails, { call: [check, "bearer ok", by_tok.valid, 1] }] }]
+      - set: [fails, { +: [fails, { call: [check, "bearer read", { call: [acl.allows, by_tok.roles, "read"] }, 1] }] }]
+      - set: [fails, { +: [fails, { call: [check, "bearer no write", { call: [acl.allows, by_tok.roles, "write"] }, 0] }] }]
+      - decl: [listing, string, { call: [acl.tokens_json, "alice"] }]
+      - set: [fails, { +: [fails, { call: [check, "listing hides secret", { call: [listing.index_of, secret] }, -1] }] }]
+      - set: [fails, { +: [fails, { call: [check, "listing has id", { call: [listing.starts_with, "[{\"id\":\"${tok_id}\""] }, 1] }] }]
+      - decl: [on_disk, string, { call: [io.read_file, "${data_dir}/auth/tokens/${{ call: [hash.sha256, secret] }}"] }]
+      - set: [fails, { +: [fails, { call: [check, "secret not on disk", { call: [on_disk.index_of, secret] }, -1] }] }]
+      - set: [fails, { +: [fails, { call: [check, "revoke other owner", { call: [acl.revoke_token, tok_id, "mallory"] }, 0] }] }]
+      - set: [fails, { +: [fails, { call: [check, "revoke", { call: [acl.revoke_token, tok_id, "alice"] }, 1] }] }]
+      - decl: [after, museum.auth.Principal, { call: [acl.authenticate, "Bearer ${secret}"] }]
+      - set: [fails, { +: [fails, { call: [check, "revoked token rejected", after.valid, 0] }] }]
+
+      # bootstrap admin token, idempotent
+      - call: [acl.ensure_admin_token, "bootstrap-secret-0123456789abcdef"]
+      - call: [acl.ensure_admin_token, "bootstrap-secret-0123456789abcdef"]
+      - decl: [boot, museum.auth.Principal, { call: [acl.authenticate, "Bearer bootstrap-secret-0123456789abcdef"] }]
+      - set: [fails, { +: [fails, { call: [check, "bootstrap admin", { call: [acl.allows, boot.roles, "admin"] }, 1] }] }]
+
+      # config: unsupported identity source is reported, not ignored
+      - call: [io.write_file, "${data_dir}/museum.yaml", "auth:\n  identity_sources: [local, ldap]\n"]
+      - decl: [acl2, ptr<museum.auth.AccessControl>, { new: museum.auth.AccessControl }]
+      - set: [acl2.data_dir, data_dir]
+      - set: [fails, { +: [fails, { call: [check, "ldap not yet available", { call: [acl2.load_config, "${data_dir}/museum.yaml"] }, 0] }] }]
+      - decl: [anon2, museum.auth.Principal, { call: [acl2.authenticate, ""] }]
+      - set: [fails, { +: [fails, { call: [check, "anonymous default reader", anon2.valid, 1] }] }]
+      - decl: [anon3, museum.auth.Principal, { call: [acl2.authenticate, "Basic Og=="] }]
+      - set: [fails, { +: [fails, { call: [check, "empty basic is anonymous", anon3.valid, 1] }] }]
+      - decl: [anon3_kind, string, anon3.kind]
+      - set: [fails, { +: [fails, { call: [check, "empty basic kind", { call: [anon3_kind.starts_with, "anonymous"] }, 1] }] }]
+
+      - call: [io.remove_all, data_dir]
+      - print: ["auth tests failed: ${fails}"]
+      - return: [fails]

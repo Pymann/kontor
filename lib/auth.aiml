@@ -1,0 +1,706 @@
+# museum.auth — identities, API tokens, roles (contract doc/ecosystem.md §6).
+#
+# Storage (below <data>/auth/, every file written atomically):
+#   users/<name>          {"name","password":"pbkdf2$<iter>$<salt>$<key>","roles":[…],"source":"local"}
+#   tokens/<sha256>       {"id","owner","label","roles":[…],"created_ms"} — the file NAME is
+#                         sha256(secret); the secret itself is never stored.
+#
+# Roles are lists of actions (cosmos spec 100 F100-11).  Actions:
+#   read  write  delete  admin  webhook_admin      ("*" = every action)
+#
+# Identity sources: `local` (below), `ldap` and `saml` (lib/identity.aiml, on
+# the aiml identity builtins, spec/67).  LDAP answers HTTP Basic logins;
+# SAML logins end in a session token (a normal API token with an expiry).
+# Directory/IdP groups become roles through `auth.group_roles`; every LDAP or
+# SAML user also gets `auth.default_role` (default reader; "none" = groups only).
+
+- namespace: museum.auth
+
+- import: "text.aiml"
+- import: "store.aiml"
+- import: "identity.aiml"
+
+# Identity sources (auth.identity_sources in museum.yaml): local (users and
+# tokens below), ldap and saml.  authenticate() asks local first, then LDAP.
+
+- model:
+    name: Principal
+    fields:
+      - [valid, i32, 0]
+      - [name, string, ""]
+      - [kind, string, ""]       # anonymous | user | token
+      - [roles, string, ""]      # comma-separated role names
+
+# A valid user or token name: [A-Za-z0-9._@-], 1..64 chars.
+- def:
+    name: valid_name
+    args: [[name, string]]
+    return: i32
+    body:
+      - if:
+          condition: { or: [{ lt: [name.len, 1] }, { gt: [name.len, 64] }] }
+          then:
+            - return: [0]
+      - decl: [allowed, string, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._@-"]
+      - decl: [idx, i32, 0]
+      - while:
+          condition: { lt: [idx, name.len] }
+          body:
+            - decl: [one, string, { call: [name.substr, idx, 1] }]
+            - if:
+                condition: { lt: [{ call: [allowed.index_of, one] }, 0] }
+                then:
+                  - return: [0]
+            - set: [idx, { +: [idx, 1] }]
+      - if:
+          condition: { eq: [{ call: [name.replace, ".", ""] }, ""] }
+          then:
+            - return: [0]
+      - return: [1]
+
+# "a,b" → ["a","b"] (empty parts dropped).
+- def:
+    name: csv_list
+    args: [[csv, string]]
+    return: list<string>
+    body:
+      - decl: [out, list<string>]
+      - decl: [parts, list<string>, { call: [csv.split, ","] }]
+      - decl: [idx, i32, 0]
+      - while:
+          condition: { lt: [idx, parts.len] }
+          body:
+            - decl: [one, string, { call: [parts.get, idx] }]
+            - decl: [trimmed, string, { call: [one.trim] }]
+            - if:
+                condition: { gt: [trimmed.len, 0] }
+                then:
+                  - call: [out.push, trimmed]
+            - set: [idx, { +: [idx, 1] }]
+      - return: [out]
+
+# YAML/JSON sequence of scalars → comma-separated string.
+- def:
+    name: seq_csv
+    args: [[seq, ptr<yaml_node>]]
+    return: string
+    body:
+      - decl: [out, string, ""]
+      - decl: [count, i32, { call: [yaml.size, seq] }]
+      - decl: [idx, i32, 0]
+      - while:
+          condition: { lt: [idx, count] }
+          body:
+            - decl: [val, string, { call: [yaml.scalar, { call: [yaml.item, seq, idx] }] }]
+            - if:
+                condition: { gt: [out.len, 0] }
+                then:
+                  - set: [out, "${out},"]
+            - set: [out, "${out}${val}"]
+            - set: [idx, { +: [idx, 1] }]
+      - return: [out]
+
+- def:
+    name: csv_json
+    args: [[csv, string]]
+    return: string
+    body:
+      - return: [{ call: [museum.text.json_list, { call: [museum.auth.csv_list, csv] }] }]
+
+- class:
+    name: AccessControl
+    members:
+      - [data_dir, string, "./data", { access: public }]
+      - [anonymous_role, string, "reader", { access: public }]
+      # role → comma-separated actions
+      - [roles, map<string:string>, null, { access: public }]
+      - [pbkdf2_iterations, i32, 100000, { access: public }]
+      - [config_error, string, "", { access: public }]
+      # LDAP / SAML (lib/identity.aiml); null when neither is configured.
+      - [idp, ptr<museum.identity.IdentitySources>, null, { access: public }]
+      - [use_ldap, i32, 0, { access: public }]
+      - [use_saml, i32, 0, { access: public }]
+      # directory/IdP group → role, and the role every external user gets
+      - [group_roles, map<string:string>, null, { access: public }]
+      - [default_role, string, "reader", { access: public }]
+    methods:
+      - def:
+          name: auth_dir
+          return: string
+          body:
+            - return: ["${<.data_dir}/auth"]
+
+      # Built-in roles; museum.yaml `roles:` adds to or overrides them.
+      - def:
+          name: default_roles
+          body:
+            - call: [<.roles.put, "reader", "read"]
+            - call: [<.roles.put, "writer", "read,write"]
+            - call: [<.roles.put, "maintainer", "read,write,delete"]
+            - call: [<.roles.put, "admin", "*"]
+
+      # Reads <data>/museum.yaml if present:
+      #   auth: { anonymous: <role>|none, identity_sources: [local] }
+      #   roles: { <name>: [<action>, …], … }
+      - def:
+          name: load_config
+          static_off: ["str_cmp"]
+          args: [[config_path, string]]
+          return: i32
+          body:
+            - call: [<.default_roles]
+            - if:
+                condition: { not: [{ call: [io.exists, config_path] }] }
+                then:
+                  - return: [1]
+            - decl: [doc, ptr<yaml_doc>, { call: [yaml.parse_file, config_path] }]
+            - decl: [perr, string, { call: [yaml.error, doc] }]
+            - if:
+                condition: { gt: [perr.len, 0] }
+                then:
+                  - set: [<.config_error, "${config_path}: ${perr}"]
+                  - call: [yaml.free, doc]
+                  - return: [0]
+            - decl: [root, ptr<yaml_node>, { call: [yaml.root, doc] }]
+            - decl: [auth_node, ref<yaml_node>, { call: [yaml.get, root, "auth"] }]
+            - decl: [anon, string, { call: [yaml.scalar, { call: [yaml.get, auth_node, "anonymous"] }] }]
+            - if:
+                condition: { gt: [anon.len, 0] }
+                then:
+                  - set: [<.anonymous_role, anon]
+            - decl: [sources, string, { call: [museum.auth.seq_csv, { call: [yaml.get, auth_node, "identity_sources"] }] }]
+            - decl: [src_list, list<string>, { call: [museum.auth.csv_list, sources] }]
+            - decl: [sidx, i32, 0]
+            - while:
+                condition: { lt: [sidx, src_list.len] }
+                body:
+                  - decl: [src, string, { call: [src_list.get, sidx] }]
+                  - decl: [known_src, i32, 0]
+                  - if: { condition: { eq: [src, "local"] }, then: [{ set: [known_src, 1] }] }
+                  - if: { condition: { eq: [src, "ldap"] }, then: [{ set: [known_src, 1] }, { set: [<.use_ldap, 1] }] }
+                  - if: { condition: { eq: [src, "saml"] }, then: [{ set: [known_src, 1] }, { set: [<.use_saml, 1] }] }
+                  - if:
+                      condition: { eq: [known_src, 0] }
+                      then:
+                        - set: [<.config_error, "unknown identity source '${src}' (local, ldap, saml)"]
+                  - set: [sidx, { +: [sidx, 1] }]
+            - if:
+                condition: { or: [{ eq: [<.use_ldap, 1] }, { eq: [<.use_saml, 1] }] }
+                then:
+                  - decl: [idp_new, ptr<museum.identity.IdentitySources>, { new: museum.identity.IdentitySources }]
+                  - decl: [idp_err, string, { call: [idp_new.load, auth_node, <.use_ldap, <.use_saml] }]
+                  - if: { condition: { gt: [idp_err.len, 0] }, then: [{ set: [<.config_error, idp_err] }] }
+                  - set: [<.idp, idp_new]
+                  - decl: [drole, string, { call: [yaml.scalar, { call: [yaml.get, auth_node, "default_role"] }] }]
+                  - if: { condition: { gt: [drole.len, 0] }, then: [{ set: [<.default_role, drole] }] }
+                  - decl: [gr_node, ref<yaml_node>, { call: [yaml.get, auth_node, "group_roles"] }]
+                  - decl: [gcount, i32, { call: [yaml.size, gr_node] }]
+                  - decl: [gidx, i32, 0]
+                  - while:
+                      condition: { lt: [gidx, gcount] }
+                      body:
+                        - call: [<.group_roles.put, { call: [yaml.key, gr_node, gidx] }, { call: [yaml.scalar, { call: [yaml.value, gr_node, gidx] }] }]
+                        - set: [gidx, { +: [gidx, 1] }]
+            - decl: [roles_node, ref<yaml_node>, { call: [yaml.get, root, "roles"] }]
+            - decl: [rcount, i32, { call: [yaml.size, roles_node] }]
+            - decl: [ridx, i32, 0]
+            - while:
+                condition: { lt: [ridx, rcount] }
+                body:
+                  - decl: [rname, string, { call: [yaml.key, roles_node, ridx] }]
+                  - decl: [actions, string, { call: [museum.auth.seq_csv, { call: [yaml.value, roles_node, ridx] }] }]
+                  - call: [<.roles.put, rname, actions]
+                  - set: [ridx, { +: [ridx, 1] }]
+            - call: [yaml.free, doc]
+            - if:
+                condition: { gt: [<.config_error.len, 0] }
+                then:
+                  - return: [0]
+            - return: [1]
+
+      # Does any of the comma-separated roles grant `action`?
+      - def:
+          name: allows
+          args: [[roles_csv, string], [action, string]]
+          return: i32
+          body:
+            - decl: [role_list, list<string>, { call: [museum.auth.csv_list, roles_csv] }]
+            - decl: [idx, i32, 0]
+            - while:
+                condition: { lt: [idx, role_list.len] }
+                body:
+                  - decl: [role, string, { call: [role_list.get, idx] }]
+                  - if:
+                      condition: { eq: [{ call: [<.roles.contains, role] }, 1] }
+                      then:
+                        - decl: [granted, string, { call: [<.roles.get, role] }]
+                        - decl: [acts, list<string>, { call: [museum.auth.csv_list, granted] }]
+                        - if:
+                            condition: { or: [{ eq: [{ call: [acts.contains, "*"] }, 1] }, { eq: [{ call: [acts.contains, action] }, 1] }] }
+                            then:
+                              - return: [1]
+                  - set: [idx, { +: [idx, 1] }]
+            - return: [0]
+
+      # Every role named in `roles_csv` exists.
+      - def:
+          name: known_roles
+          args: [[roles_csv, string]]
+          return: i32
+          body:
+            - decl: [role_list, list<string>, { call: [museum.auth.csv_list, roles_csv] }]
+            - if:
+                condition: { eq: [role_list.len, 0] }
+                then:
+                  - return: [0]
+            - decl: [idx, i32, 0]
+            - while:
+                condition: { lt: [idx, role_list.len] }
+                body:
+                  - if:
+                      condition: { eq: [{ call: [<.roles.contains, { call: [role_list.get, idx] }] }, 0] }
+                      then:
+                        - return: [0]
+                  - set: [idx, { +: [idx, 1] }]
+            - return: [1]
+
+      # Every action granted by `wanted` is also granted by `held` — a caller may
+      # only hand out what it has.
+      - def:
+          name: roles_within
+          args: [[wanted, string], [held, string]]
+          return: i32
+          body:
+            - if:
+                condition: { eq: [{ call: [<.allows, held, "admin"] }, 1] }
+                then:
+                  - return: [1]
+            - decl: [want_list, list<string>, { call: [museum.auth.csv_list, wanted] }]
+            - decl: [widx, i32, 0]
+            - while:
+                condition: { lt: [widx, want_list.len] }
+                body:
+                  - decl: [granted, string, { call: [<.roles.get, { call: [want_list.get, widx] }] }]
+                  - decl: [acts, list<string>, { call: [museum.auth.csv_list, granted] }]
+                  - decl: [aidx, i32, 0]
+                  - while:
+                      condition: { lt: [aidx, acts.len] }
+                      body:
+                        - decl: [act, string, { call: [acts.get, aidx] }]
+                        - if:
+                            condition: { or: [{ eq: [act, "*"] }, { eq: [{ call: [<.allows, held, act] }, 0] }] }
+                            then:
+                              - return: [0]
+                        - set: [aidx, { +: [aidx, 1] }]
+                  - set: [widx, { +: [widx, 1] }]
+            - return: [1]
+
+      - def:
+          name: anonymous
+          return: museum.auth.Principal
+          body:
+            - decl: [who, museum.auth.Principal]
+            - set: [who.kind, "anonymous"]
+            - set: [who.name, "anonymous"]
+            - if:
+                condition: { and: [{ neq: [<.anonymous_role, "none"] }, { eq: [{ call: [<.roles.contains, <.anonymous_role] }, 1] }] }
+                then:
+                  - set: [who.valid, 1]
+                  - set: [who.roles, <.anonymous_role]
+            - return: [who]
+
+      # ── users ─────────────────────────────────────────────────────────────
+      - def:
+          name: hash_password
+          args: [[password, string]]
+          return: string
+          body:
+            - decl: [salt, string, { call: [math.random_hex, 16] }]
+            - decl: [key, string, { call: [hash.pbkdf2, password, salt, <.pbkdf2_iterations] }]
+            - return: ["pbkdf2$${<.pbkdf2_iterations}$${salt}$${key}"]
+
+      - def:
+          name: user_path
+          args: [[name, string]]
+          return: string
+          body:
+            - return: ["${{ call: [<.auth_dir] }}/users/${name}"]
+
+      # Creates or replaces a local user.  Returns "" or an error message.
+      - def:
+          name: put_user
+          args: [[name, string], [password, string], [roles_csv, string]]
+          return: string
+          body:
+            - if:
+                condition: { eq: [{ call: [museum.auth.valid_name, name] }, 0] }
+                then:
+                  - return: ["invalid user name"]
+            - if:
+                condition: { lt: [password.len, 8] }
+                then:
+                  - return: ["password must have at least 8 characters"]
+            - if:
+                condition: { eq: [{ call: [<.known_roles, roles_csv] }, 0] }
+                then:
+                  - return: ["unknown or empty roles"]
+            - decl: [stored, string, { call: [<.hash_password, password] }]
+            - decl: [name_json, string, { call: [museum.text.json_str, name] }]
+            - decl: [pw_json, string, { call: [museum.text.json_str, stored] }]
+            - decl: [roles_json, string, { call: [museum.auth.csv_json, roles_csv] }]
+            - decl: [dir, string, "${{ call: [<.auth_dir] }}/users"]
+            - call: [museum.store.write_text, <.data_dir, dir, name, "{\"name\":${name_json},\"password\":${pw_json},\"roles\":${roles_json},\"source\":\"local\"}"]
+            - return: [""]
+
+      - def:
+          name: delete_user
+          args: [[name, string]]
+          return: i32
+          body:
+            - if:
+                condition: { eq: [{ call: [museum.auth.valid_name, name] }, 0] }
+                then:
+                  - return: [0]
+            - decl: [upath, string, { call: [<.user_path, name] }]
+            - if:
+                condition: { not: [{ call: [io.exists, upath] }] }
+                then:
+                  - return: [0]
+            - call: [io.remove, upath]
+            - return: [1]
+
+      # Principal for name + password, or valid=0.
+      - def:
+          name: check_password
+          args: [[name, string], [password, string]]
+          return: museum.auth.Principal
+          body:
+            - decl: [who, museum.auth.Principal]
+            - if:
+                condition: { or: [{ eq: [{ call: [museum.auth.valid_name, name] }, 0] }, { eq: [password.len, 0] }] }
+                then:
+                  - return: [who]
+            - decl: [upath, string, { call: [<.user_path, name] }]
+            - if:
+                condition: { not: [{ call: [io.exists, upath] }] }
+                then:
+                  - return: [who]
+            - decl: [doc, ptr<yaml_doc>, { call: [yaml.parse_file, upath] }]
+            - decl: [root, ptr<yaml_node>, { call: [yaml.root, doc] }]
+            - decl: [stored, string, { call: [yaml.scalar, { call: [yaml.get, root, "password"] }] }]
+            - decl: [roles_csv, string, { call: [museum.auth.seq_csv, { call: [yaml.get, root, "roles"] }] }]
+            - call: [yaml.free, doc]
+            - decl: [parts, list<string>, { call: [stored.split, "$"] }]
+            - if:
+                condition: { neq: [parts.len, 4] }
+                then:
+                  - return: [who]
+            - decl: [iters, i32, { call: [parts.get, 1] }]
+            - decl: [salt, string, { call: [parts.get, 2] }]
+            - decl: [want, string, { call: [parts.get, 3] }]
+            - decl: [got, string, { call: [hash.pbkdf2, password, salt, iters] }]
+            - if:
+                condition: { eq: [{ call: [hash.const_time_eq, got, want] }, 1] }
+                then:
+                  - set: [who.valid, 1]
+                  - set: [who.name, name]
+                  - set: [who.kind, "user"]
+                  - set: [who.roles, roles_csv]
+            - return: [who]
+
+      - def:
+          name: users_json
+          return: string
+          body:
+            - decl: [names, list<string>, { call: [museum.store.list_files, "${{ call: [<.auth_dir] }}/users"] }]
+            - decl: [out, string, ""]
+            - decl: [idx, i32, 0]
+            - while:
+                condition: { lt: [idx, names.len] }
+                body:
+                  - decl: [name, string, { call: [names.get, idx] }]
+                  - decl: [doc, ptr<yaml_doc>, { call: [yaml.parse_file, { call: [<.user_path, name] }] }]
+                  - decl: [root, ptr<yaml_node>, { call: [yaml.root, doc] }]
+                  - decl: [roles_csv, string, { call: [museum.auth.seq_csv, { call: [yaml.get, root, "roles"] }] }]
+                  - decl: [source, string, { call: [yaml.scalar, { call: [yaml.get, root, "source"] }] }]
+                  - call: [yaml.free, doc]
+                  - decl: [name_json, string, { call: [museum.text.json_str, name] }]
+                  - decl: [src_json, string, { call: [museum.text.json_str, source] }]
+                  - if:
+                      condition: { gt: [out.len, 0] }
+                      then:
+                        - set: [out, "${out},"]
+                  - set: [out, "${out}{\"name\":${name_json},\"roles\":${{ call: [museum.auth.csv_json, roles_csv] }},\"source\":${src_json}}"]
+                  - set: [idx, { +: [idx, 1] }]
+            - return: ["[${out}]"]
+
+      # ── tokens ────────────────────────────────────────────────────────────
+      - def:
+          name: token_dir
+          return: string
+          body:
+            - return: ["${{ call: [<.auth_dir] }}/tokens"]
+
+      # Stores a token for `secret` (only its sha256).  Returns the token id.
+      - def:
+          name: store_token
+          args: [[secret, string], [token_id, string], [owner, string], [label, string], [roles_csv, string]]
+          return: string
+          body:
+            - decl: [digest, string, { call: [hash.sha256, secret] }]
+            - decl: [now_ms, i64, { call: [time.now] }]
+            - decl: [id_json, string, { call: [museum.text.json_str, token_id] }]
+            - decl: [owner_json, string, { call: [museum.text.json_str, owner] }]
+            - decl: [label_json, string, { call: [museum.text.json_str, label] }]
+            - decl: [roles_json, string, { call: [museum.auth.csv_json, roles_csv] }]
+            - call: [museum.store.write_text, <.data_dir, { call: [<.token_dir] }, digest, "{\"id\":${id_json},\"owner\":${owner_json},\"label\":${label_json},\"roles\":${roles_json},\"created_ms\":${now_ms}}"]
+            - return: [token_id]
+
+      # New random token: returns the secret (shown once).  The caller checks
+      # that roles_csv is known and within its own rights.
+      - def:
+          name: create_token
+          args: [[owner, string], [label, string], [roles_csv, string]]
+          return: string
+          body:
+            - decl: [secret, string, { call: [math.random_hex, 32] }]
+            - decl: [token_id, string, { call: [math.random_hex, 6] }]
+            - call: [<.store_token, secret, token_id, owner, label, roles_csv]
+            - return: ["${token_id}:${secret}"]
+
+      # Principal for a token secret, or valid=0.  `owner` must match when given
+      # (Basic auth "user:token").
+      - def:
+          name: check_token
+          args: [[secret, string], [owner, string]]
+          return: museum.auth.Principal
+          body:
+            - decl: [who, museum.auth.Principal]
+            - if:
+                condition: { lt: [secret.len, 16] }
+                then:
+                  - return: [who]
+            - decl: [digest, string, { call: [hash.sha256, secret] }]
+            - decl: [tpath, string, "${{ call: [<.token_dir] }}/${digest}"]
+            - if:
+                condition: { not: [{ call: [io.exists, tpath] }] }
+                then:
+                  - return: [who]
+            - decl: [doc, ptr<yaml_doc>, { call: [yaml.parse_file, tpath] }]
+            - decl: [root, ptr<yaml_node>, { call: [yaml.root, doc] }]
+            - decl: [tok_owner, string, { call: [yaml.scalar, { call: [yaml.get, root, "owner"] }] }]
+            - decl: [roles_csv, string, { call: [museum.auth.seq_csv, { call: [yaml.get, root, "roles"] }] }]
+            - decl: [expires, string, { call: [yaml.scalar, { call: [yaml.get, root, "expires_ms"] }] }]
+            - call: [yaml.free, doc]
+            - if:
+                condition: { and: [{ gt: [owner.len, 0] }, { neq: [owner, tok_owner] }] }
+                then:
+                  - return: [who]
+            # Session tokens (SAML) expire; API tokens have no expires_ms.
+            - if:
+                condition: { gt: [expires.len, 0] }
+                then:
+                  - decl: [until_ms, i64, expires]
+                  - if:
+                      condition: { lt: [until_ms, { call: [time.now] }] }
+                      then:
+                        - return: [who]
+            - set: [who.valid, 1]
+            - set: [who.name, tok_owner]
+            - set: [who.kind, "token"]
+            - set: [who.roles, roles_csv]
+            - return: [who]
+
+      # Revokes by token id; `owner` restricts to that owner's tokens ("" = any).
+      - def:
+          name: revoke_token
+          args: [[token_id, string], [owner, string]]
+          return: i32
+          body:
+            - decl: [files, list<string>, { call: [museum.store.list_files, { call: [<.token_dir] }] }]
+            - decl: [idx, i32, 0]
+            - while:
+                condition: { lt: [idx, files.len] }
+                body:
+                  - decl: [tpath, string, "${{ call: [<.token_dir] }}/${{ call: [files.get, idx] }}"]
+                  - decl: [doc, ptr<yaml_doc>, { call: [yaml.parse_file, tpath] }]
+                  - decl: [root, ptr<yaml_node>, { call: [yaml.root, doc] }]
+                  - decl: [tid, string, { call: [yaml.scalar, { call: [yaml.get, root, "id"] }] }]
+                  - decl: [tok_owner, string, { call: [yaml.scalar, { call: [yaml.get, root, "owner"] }] }]
+                  - call: [yaml.free, doc]
+                  - if:
+                      condition: { and: [{ eq: [tid, token_id] }, { or: [{ eq: [owner.len, 0] }, { eq: [owner, tok_owner] }] }] }
+                      then:
+                        - call: [io.remove, tpath]
+                        - return: [1]
+                  - set: [idx, { +: [idx, 1] }]
+            - return: [0]
+
+      # Tokens as JSON (never the secret, never its hash); `owner` filters ("" = all).
+      - def:
+          name: tokens_json
+          args: [[owner, string]]
+          return: string
+          body:
+            - decl: [files, list<string>, { call: [museum.store.list_files, { call: [<.token_dir] }] }]
+            - decl: [out, string, ""]
+            - decl: [idx, i32, 0]
+            - while:
+                condition: { lt: [idx, files.len] }
+                body:
+                  - decl: [doc, ptr<yaml_doc>, { call: [yaml.parse_file, "${{ call: [<.token_dir] }}/${{ call: [files.get, idx] }}"] }]
+                  - decl: [root, ptr<yaml_node>, { call: [yaml.root, doc] }]
+                  - decl: [tid, string, { call: [yaml.scalar, { call: [yaml.get, root, "id"] }] }]
+                  - decl: [tok_owner, string, { call: [yaml.scalar, { call: [yaml.get, root, "owner"] }] }]
+                  - decl: [label, string, { call: [yaml.scalar, { call: [yaml.get, root, "label"] }] }]
+                  - decl: [created, string, { call: [yaml.scalar, { call: [yaml.get, root, "created_ms"] }] }]
+                  - decl: [roles_csv, string, { call: [museum.auth.seq_csv, { call: [yaml.get, root, "roles"] }] }]
+                  - call: [yaml.free, doc]
+                  - if:
+                      condition: { or: [{ eq: [owner.len, 0] }, { eq: [owner, tok_owner] }] }
+                      then:
+                        - if:
+                            condition: { gt: [out.len, 0] }
+                            then:
+                              - set: [out, "${out},"]
+                        - set: [out, "${out}{\"id\":${{ call: [museum.text.json_str, tid] }},\"owner\":${{ call: [museum.text.json_str, tok_owner] }},\"label\":${{ call: [museum.text.json_str, label] }},\"roles\":${{ call: [museum.auth.csv_json, roles_csv] }},\"created_ms\":${created}}"]
+                  - set: [idx, { +: [idx, 1] }]
+            - return: ["[${out}]"]
+
+      # Bootstrap: make `secret` a valid admin token (id "bootstrap").  Idempotent.
+      - def:
+          name: ensure_admin_token
+          args: [[secret, string]]
+          body:
+            - decl: [digest, string, { call: [hash.sha256, secret] }]
+            - if:
+                condition: { not: [{ call: [io.exists, "${{ call: [<.token_dir] }}/${digest}"] }] }
+                then:
+                  - call: [<.store_token, secret, "bootstrap", "admin", "bootstrap admin token", "admin"]
+
+      # ── external identities (LDAP / SAML) ─────────────────────────────────
+      # Roles for an external user: default_role plus every mapped group.
+      - def:
+          name: roles_for_groups
+          args: [[groups_csv, string]]
+          return: string
+          body:
+            - decl: [out, string, ""]
+            - if:
+                condition: { and: [{ neq: [<.default_role, "none"] }, { eq: [{ call: [<.roles.contains, <.default_role] }, 1] }] }
+                then:
+                  - set: [out, <.default_role]
+            - decl: [glist, list<string>, { call: [museum.auth.csv_list, groups_csv] }]
+            - decl: [idx, i32, 0]
+            - while:
+                condition: { lt: [idx, glist.len] }
+                body:
+                  - decl: [grp, string, { call: [glist.get, idx] }]
+                  - if:
+                      condition: { eq: [{ call: [<.group_roles.contains, grp] }, 1] }
+                      then:
+                        - decl: [mapped, string, { call: [<.group_roles.get, grp] }]
+                        - decl: [have, list<string>, { call: [museum.auth.csv_list, out] }]
+                        - if:
+                            condition: { eq: [{ call: [have.contains, mapped] }, 0] }
+                            then:
+                              - if: { condition: { gt: [out.len, 0] }, then: [{ set: [out, "${out},"] }] }
+                              - set: [out, "${out}${mapped}"]
+                  - set: [idx, { +: [idx, 1] }]
+            - return: [out]
+
+      - def:
+          name: external_principal
+          args: [[ident, museum.identity.Identity]]
+          return: museum.auth.Principal
+          body:
+            - decl: [who, museum.auth.Principal]
+            - if:
+                condition: { eq: [ident.valid, 0] }
+                then:
+                  - return: [who]
+            - set: [who.valid, 1]
+            - set: [who.name, ident.name]
+            - set: [who.kind, "user"]
+            - set: [who.roles, { call: [<.roles_for_groups, ident.groups] }]
+            - return: [who]
+
+      # Session token for a SAML login: an API token that expires.  Returns
+      # "<id>:<secret>".
+      - def:
+          name: create_session_token
+          args: [[owner, string], [roles_csv, string], [hours, i32]]
+          return: string
+          body:
+            - decl: [secret, string, { call: [math.random_hex, 32] }]
+            - decl: [token_id, string, { call: [math.random_hex, 6] }]
+            - decl: [digest, string, { call: [hash.sha256, secret] }]
+            - decl: [now_ms, i64, { call: [time.now] }]
+            - decl: [life_ms, i64, { '*': [hours, 3600000] }]
+            - decl: [until_ms, i64, { +: [now_ms, life_ms] }]
+            - decl: [body, string, "{\"id\":${{ call: [museum.text.json_str, token_id] }},\"owner\":${{ call: [museum.text.json_str, owner] }},\"label\":\"saml session\",\"roles\":${{ call: [museum.auth.csv_json, roles_csv] }},\"created_ms\":${now_ms},\"expires_ms\":${until_ms}}"]
+            - call: [museum.store.write_text, <.data_dir, { call: [<.token_dir] }, digest, body]
+            - return: ["${token_id}:${secret}"]
+
+      # ── request authentication ────────────────────────────────────────────
+      # Principal for an Authorization header value.  Missing header →
+      # anonymous; a header that does not verify → valid=0 (never falls back to
+      # anonymous: a wrong credential is an error, not an anonymous request).
+      - def:
+          name: authenticate
+          args: [[authorization, string]]
+          return: museum.auth.Principal
+          body:
+            - if:
+                condition: { eq: [authorization.len, 0] }
+                then:
+                  - return: [{ call: [<.anonymous] }]
+            - decl: [who, museum.auth.Principal]
+            - decl: [space, i32, { call: [authorization.index_of, " "] }]
+            - if:
+                condition: { le: [space, 0] }
+                then:
+                  - return: [who]
+            - decl: [lowered, string, { call: [authorization.lower] }]
+            - decl: [cred, string, { call: [authorization.substr, { +: [space, 1] }] }]
+            - set: [cred, { call: [cred.trim] }]
+            - if:
+                condition: { eq: [{ call: [lowered.starts_with, "bearer "] }, 1] }
+                then:
+                  - return: [{ call: [<.check_token, cred, ""] }]
+            - if:
+                condition: { eq: [{ call: [lowered.starts_with, "basic "] }, 0] }
+                then:
+                  - return: [who]
+            - decl: [pair, string, { call: [base64.decode_str, cred] }]
+            - if:
+                condition: { eq: [pair, null] }
+                then:
+                  - return: [who]
+            # Empty user and password (`Basic Og==`): what OCI clients such as
+            # skopeo send when they have no credentials — anonymous.
+            - if:
+                condition: { eq: [pair, ":"] }
+                then:
+                  - return: [{ call: [<.anonymous] }]
+            - decl: [colon, i32, { call: [pair.index_of, ":"] }]
+            - if:
+                condition: { le: [colon, 0] }
+                then:
+                  - return: [who]
+            - decl: [user, string, { call: [pair.substr, 0, colon] }]
+            - decl: [secret, string, { call: [pair.substr, { +: [colon, 1] }] }]
+            # A token as password (docker login): `user` must own it.
+            - decl: [by_token, museum.auth.Principal, { call: [<.check_token, secret, user] }]
+            - if:
+                condition: { eq: [by_token.valid, 1] }
+                then:
+                  - return: [by_token]
+            - decl: [local_who, museum.auth.Principal, { call: [<.check_password, user, secret] }]
+            - if:
+                condition: { or: [{ eq: [local_who.valid, 1] }, { eq: [<.use_ldap, 0] }] }
+                then:
+                  - return: [local_who]
+            # Local first (a break-glass admin works without the directory), then LDAP.
+            - decl: [ident, museum.identity.Identity, { call: [<.idp.ldap_check, user, secret] }]
+            - return: [{ call: [<.external_principal, ident] }]

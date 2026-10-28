@@ -17,12 +17,47 @@ fail() { FAILS=$((FAILS + 1)); echo "  FAIL $1"; }
 check() { if [ "$2" = "$3" ]; then pass "$1"; else fail "$1: got '$2' want '$3'"; fi; }
 # json <file> <python expression over j>
 json() { python3 -c "import json,sys; j=json.load(open(sys.argv[1])); print($2)" "$1"; }
-status() { curl -s -o "$WORK/body" -w '%{http_code}' "$@"; }
+ADMIN_TOKEN=$(head -c 32 /dev/urandom | sha256sum | cut -d' ' -f1)
+# status: as admin (Bearer); anon: without credentials
+status() { curl -s -o "${OUT:-$WORK/body}" -w '%{http_code}' -H "Authorization: Bearer $ADMIN_TOKEN" "$@"; }
+anon() { curl -s -o "${OUT:-$WORK/body}" -w '%{http_code}' "$@"; }
 
-"$AIML_BIN" museum.aiml -- "$PORT" "$DATA" > "$WORK/server.log" 2>&1 &
+MUSEUM_ADMIN_TOKEN="$ADMIN_TOKEN" "$AIML_BIN" museum.aiml -- "$PORT" "$DATA" > "$WORK/server.log" 2>&1 &
 SRV=$!
-for _ in $(seq 100); do curl -s -o /dev/null "$BASE/api/health" && break; sleep 0.2; done
+for _ in $(seq $((${STARTUP_WAIT:-20} * 5))); do curl -s -o /dev/null "$BASE/api/health" && break; sleep 0.2; done
 check "health" "$(status "$BASE/api/health")" "200"
+grep -q "$ADMIN_TOKEN" "$WORK/server.log" && fail "bootstrap token appears in the log" || pass "bootstrap token not logged"
+
+echo "auth"
+check "anonymous whoami" "$(anon "$BASE/api/v1/whoami")" "200"
+check "anonymous is reader" "$(json "$WORK/body" "(j['kind'], j['roles'])")" "('anonymous', ['reader'])"
+check "admin whoami" "$(status "$BASE/api/v1/whoami")" "200"
+check "admin roles" "$(json "$WORK/body" "(j['name'], j['roles'])")" "('admin', ['admin'])"
+check "bad bearer -> 401" "$(anon -H 'Authorization: Bearer 00ff' "$BASE/api/v1/whoami")" "401"
+check "401 error is JSON with code" "$(json "$WORK/body" "j['code']")" "unauthorized"
+check "anonymous write -> 401" "$(anon -X PUT --data-binary 'x' "$BASE/generic/anon.bin")" "401"
+check "challenge header" "$(curl -s -o /dev/null -D - -X PUT --data-binary x "$BASE/generic/anon.bin" | grep -i '^www-authenticate' | tr -d '\r')" 'www-authenticate: Basic realm="museum"'
+check "create user ci" "$(status -X POST -d '{"name":"ci","password":"s3cret-pass","roles":["writer"]}' "$BASE/api/v1/users")" "201"
+check "short password rejected" "$(status -X POST -d '{"name":"bob","password":"short","roles":["reader"]}' "$BASE/api/v1/users")" "400"
+check "users list" "$(status "$BASE/api/v1/users" > /dev/null; json "$WORK/body" "[u['name'] for u in j['users']]")" "['ci']"
+check "basic user:password" "$(anon -u ci:s3cret-pass "$BASE/api/v1/whoami" > /dev/null; json "$WORK/body" "(j['name'], j['kind'])")" "('ci', 'user')"
+check "wrong password -> 401" "$(anon -u ci:wrong-pass "$BASE/api/v1/whoami")" "401"
+check "ci mints writer token" "$(anon -u ci:s3cret-pass -X POST -d '{"label":"pipeline","roles":["writer"]}' "$BASE/api/v1/tokens")" "201"
+CI_TOKEN=$(json "$WORK/body" "j['token']"); CI_TOKEN_ID=$(json "$WORK/body" "j['id']")
+check "token is 256-bit hex" "$(echo -n "$CI_TOKEN" | grep -cE '^[0-9a-f]{64}$')" "1"
+check "only the hash is stored" "$(grep -rl "$CI_TOKEN" "$DATA/auth" 2>/dev/null | wc -l | tr -d ' ')" "0"
+check "ci cannot mint admin token" "$(anon -u ci:s3cret-pass -X POST -d '{"label":"x","roles":["admin"]}' "$BASE/api/v1/tokens")" "403"
+check "token via bearer" "$(anon -H "Authorization: Bearer $CI_TOKEN" "$BASE/api/v1/whoami" > /dev/null; json "$WORK/body" "(j['name'], j['kind'])")" "('ci', 'token')"
+check "token via basic user:token" "$(anon -u "ci:$CI_TOKEN" -X PUT --data-binary 'ci' "$BASE/generic/ci/one.bin")" "201"
+check "writer cannot list users" "$(anon -H "Authorization: Bearer $CI_TOKEN" "$BASE/api/v1/users")" "403"
+check "403 code" "$(json "$WORK/body" "j['code']")" "forbidden"
+check "ci lists own tokens" "$(anon -u ci:s3cret-pass "$BASE/api/v1/tokens" > /dev/null; json "$WORK/body" "[t['id'] for t in j['tokens']]")" "['$CI_TOKEN_ID']"
+check "token list has no secrets" "$(grep -c "$CI_TOKEN" "$WORK/body")" "0"
+check "revoke token" "$(anon -u ci:s3cret-pass -X DELETE "$BASE/api/v1/tokens/$CI_TOKEN_ID")" "204"
+check "revoked token -> 401" "$(anon -H "Authorization: Bearer $CI_TOKEN" "$BASE/api/v1/whoami")" "401"
+check "delete user" "$(status -X DELETE "$BASE/api/v1/users/ci")" "204"
+check "deleted user -> 401" "$(anon -u ci:s3cret-pass "$BASE/api/v1/whoami")" "401"
+check "unknown endpoint JSON 404" "$(anon "$BASE/api/v1/nope" > /dev/null; json "$WORK/body" "j['code']")" "not_found"
 
 echo "generic repository"
 head -c 3145728 /dev/urandom > "$WORK/blob.bin"
@@ -35,7 +70,10 @@ check "range request" "$(curl -s -o "$WORK/part.bin" -w '%{http_code}' -H 'Range
 cmp -s <(head -c 200 "$WORK/blob.bin" | tail -c 100) "$WORK/part.bin" && pass "range bytes match" || fail "range bytes differ"
 check "checksum mismatch rejected" "$(status -X PUT --data-binary @"$WORK/blob.bin" -H 'X-Checksum-Sha256: 00' "$BASE/generic/tools/other.bin")" "400"
 check "same bytes, second path" "$(status -X PUT --data-binary @"$WORK/blob.bin" "$BASE/generic/mirror/blob.bin")" "201"
-check "deduplicated (one blob)" "$(find "$DATA/cas" -type f | wc -l | tr -d ' ')" "1"
+check "deduplicated (one blob)" "$(find "$DATA/cas" -type f -size +1M | wc -l | tr -d ' ')" "1"
+check "anonymous download (reader)" "$(OUT=/dev/null anon "$BASE/generic/mirror/blob.bin")" "200"
+check "/api/v1/generic alias" "$(OUT="$WORK/alias.bin" anon "$BASE/api/v1/generic/mirror/blob.bin")" "200"
+cmp -s "$WORK/blob.bin" "$WORK/alias.bin" && pass "alias bytes identical" || fail "alias bytes differ"
 check "missing artifact" "$(status "$BASE/generic/nope/x.bin")" "404"
 check "path traversal rejected" "$(status --path-as-is "$BASE/generic/a/../../etc/passwd")" "400"
 
@@ -82,6 +120,7 @@ check "apt same version" "$(json "$WORK/apt_same.json" "(j['rebuild_count'], j['
 curl -s "$BASE/api/impact?project=net" > "$WORK/net.json"
 check "impact of net" "$(json "$WORK/net.json" "j['rebuild_waves']")" "[['app']]"
 check "impact needs a target" "$(status "$BASE/api/impact")" "400"
+check "/api/v1/impact alias" "$(anon "$BASE/api/v1/impact?project=net" > /dev/null; json "$WORK/body" "j['rebuild_waves']")" "[['app']]"
 
 echo
 echo "$PASSES passed, $FAILS failed"

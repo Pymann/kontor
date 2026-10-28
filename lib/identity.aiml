@@ -1,0 +1,297 @@
+# museum.identity — LDAP and SAML 2.0 as identity sources (contract
+# doc/ecosystem.md §6).
+#
+# The mechanisms are aiml builtins (aiml spec/67: `ldap.*`, `saml.*`); this file
+# is the policy: which directory, which DN, which attributes, which IdP.  It
+# answers "who is this and in which groups"; mapping groups to roles is
+# AccessControl's job (auth.group_roles).
+#
+#   auth:
+#     identity_sources: [local, ldap, saml]
+#     ldap:
+#       url: ldap://dir.example.org:389
+#       start_tls: false
+#       user_dn: "uid={user},ou=people,dc=example,dc=org"   # or search-then-bind:
+#       search_base: "ou=people,dc=example,dc=org"
+#       search_filter: "(uid={user})"
+#       bind_dn: "cn=museum,ou=services,dc=example,dc=org"
+#       bind_password_file: /etc/museum/ldap.pw
+#       group_attr: memberOf
+#     saml:
+#       idp_sso_url: https://idp.example.org/sso
+#       idp_cert_file: /etc/museum/idp.pem
+#       sp_entity_id: https://museum.example.org/sp
+#       acs_url: https://museum.example.org/api/v1/sso/saml/acs
+#       idp_entity_id: https://idp.example.org        # optional issuer check
+#       group_attr: groups
+#       session_hours: 12
+#
+# Fixed rules: user input goes through ldap.escape_dn / ldap.escape_filter; an
+# empty password never reaches the directory; a SAML response counts only for
+# an AuthnRequest this process issued, once, within 10 minutes.
+
+- namespace: museum.identity
+
+- model:
+    name: Identity
+    fields:
+      - [valid, i32, 0]
+      - [name, string, ""]
+      - [groups, string, ""]     # comma-separated
+      - [error, string, ""]
+
+- class:
+    name: IdentitySources
+    members:
+      - [ldap_url, string, "", { access: public }]
+      - [ldap_start_tls, i32, 0, { access: public }]
+      - [ldap_user_dn, string, "", { access: public }]
+      - [ldap_search_base, string, "", { access: public }]
+      - [ldap_search_filter, string, "(uid={user})", { access: public }]
+      - [ldap_bind_dn, string, "", { access: public }]
+      - [ldap_bind_pw_file, string, "", { access: public }]
+      - [ldap_group_attr, string, "memberOf", { access: public }]
+      - [saml_sso_url, string, "", { access: public }]
+      - [saml_cert_file, string, "", { access: public }]
+      - [saml_sp_id, string, "", { access: public }]
+      - [saml_acs_url, string, "", { access: public }]
+      - [saml_idp_id, string, "", { access: public }]
+      - [saml_group_attr, string, "", { access: public }]
+      - [saml_session_hours, i32, 12, { access: public }]
+      # request id → deadline (ms); in memory on purpose: an id that outlived
+      # a restart would be a replay window.
+      - [pending, map<string:i64>, null, { access: public }]
+    methods:
+      # Reads auth.ldap / auth.saml.  Returns "" or a configuration error.
+      - def:
+          name: load
+          static_off: ["str_cmp"]
+          args: [[auth_node, ref<yaml_node>], [want_ldap, i32], [want_saml, i32]]
+          return: string
+          body:
+            - if:
+                condition: { eq: [want_ldap, 1] }
+                then:
+                  - decl: [lnode, ref<yaml_node>, { call: [yaml.get, auth_node, "ldap"] }]
+                  - set: [<.ldap_url, { call: [yaml.scalar, { call: [yaml.get, lnode, "url"] }] }]
+                  - decl: [tls, string, { call: [yaml.scalar, { call: [yaml.get, lnode, "start_tls"] }] }]
+                  - if: { condition: { or: [{ eq: [tls, "true"] }, { eq: [tls, "1"] }] }, then: [{ set: [<.ldap_start_tls, 1] }] }
+                  - set: [<.ldap_user_dn, { call: [yaml.scalar, { call: [yaml.get, lnode, "user_dn"] }] }]
+                  - set: [<.ldap_search_base, { call: [yaml.scalar, { call: [yaml.get, lnode, "search_base"] }] }]
+                  - decl: [flt, string, { call: [yaml.scalar, { call: [yaml.get, lnode, "search_filter"] }] }]
+                  - if: { condition: { gt: [flt.len, 0] }, then: [{ set: [<.ldap_search_filter, flt] }] }
+                  - set: [<.ldap_bind_dn, { call: [yaml.scalar, { call: [yaml.get, lnode, "bind_dn"] }] }]
+                  - set: [<.ldap_bind_pw_file, { call: [yaml.scalar, { call: [yaml.get, lnode, "bind_password_file"] }] }]
+                  - decl: [gattr, string, { call: [yaml.scalar, { call: [yaml.get, lnode, "group_attr"] }] }]
+                  - if: { condition: { gt: [gattr.len, 0] }, then: [{ set: [<.ldap_group_attr, gattr] }] }
+                  - if:
+                      condition: { eq: [<.ldap_url.len, 0] }
+                      then:
+                        - return: ["auth.ldap.url is required when 'ldap' is an identity source"]
+                  - if:
+                      condition: { and: [{ eq: [<.ldap_user_dn.len, 0] }, { eq: [<.ldap_search_base.len, 0] }] }
+                      then:
+                        - return: ["auth.ldap needs user_dn or search_base (+ search_filter)"]
+            - if:
+                condition: { eq: [want_saml, 1] }
+                then:
+                  - decl: [snode, ref<yaml_node>, { call: [yaml.get, auth_node, "saml"] }]
+                  - set: [<.saml_sso_url, { call: [yaml.scalar, { call: [yaml.get, snode, "idp_sso_url"] }] }]
+                  - set: [<.saml_cert_file, { call: [yaml.scalar, { call: [yaml.get, snode, "idp_cert_file"] }] }]
+                  - set: [<.saml_sp_id, { call: [yaml.scalar, { call: [yaml.get, snode, "sp_entity_id"] }] }]
+                  - set: [<.saml_acs_url, { call: [yaml.scalar, { call: [yaml.get, snode, "acs_url"] }] }]
+                  - set: [<.saml_idp_id, { call: [yaml.scalar, { call: [yaml.get, snode, "idp_entity_id"] }] }]
+                  - set: [<.saml_group_attr, { call: [yaml.scalar, { call: [yaml.get, snode, "group_attr"] }] }]
+                  - decl: [hours, string, { call: [yaml.scalar, { call: [yaml.get, snode, "session_hours"] }] }]
+                  - if: { condition: { gt: [hours.len, 0] }, then: [{ set: [<.saml_session_hours, { call: [hours.to_int] }] }] }
+                  - if:
+                      condition: { or: [{ eq: [<.saml_sso_url.len, 0] }, { or: [{ eq: [<.saml_cert_file.len, 0] }, { or: [{ eq: [<.saml_sp_id.len, 0] }, { eq: [<.saml_acs_url.len, 0] }] }] }] }
+                      then:
+                        - return: ["auth.saml needs idp_sso_url, idp_cert_file, sp_entity_id and acs_url"]
+                  - if:
+                      condition: { not: [{ call: [io.exists, <.saml_cert_file] }] }
+                      then:
+                        - return: ["auth.saml.idp_cert_file not found: ${<.saml_cert_file}"]
+            - return: [""]
+
+      # Group values as a comma list; for a DN value its first RDN value is
+      # added too ("cn=devs,ou=groups,…" also yields "devs").
+      - def:
+          name: groups_csv
+          args: [[raw, list<string>]]
+          return: string
+          body:
+            - decl: [seen, list<string>]
+            - decl: [idx, i32, 0]
+            - while:
+                condition: { lt: [idx, raw.len] }
+                body:
+                  - decl: [one, string, { call: [raw.get, idx] }]
+                  - set: [one, { call: [one.replace, ",", ";"] }]
+                  - if: { condition: { eq: [{ call: [seen.contains, one] }, 0] }, then: [{ call: [seen.push, one] }] }
+                  - decl: [orig, string, { call: [raw.get, idx] }]
+                  - decl: [eqp, i32, { call: [orig.index_of, "="] }]
+                  - decl: [comma, i32, { call: [orig.index_of, ","] }]
+                  - if:
+                      condition: { and: [{ gt: [eqp, 0] }, { gt: [comma, eqp] }] }
+                      then:
+                        - decl: [short, string, { call: [orig.substr, { +: [eqp, 1] }, { -: [{ -: [comma, eqp] }, 1] }] }]
+                        - if: { condition: { eq: [{ call: [seen.contains, short] }, 0] }, then: [{ call: [seen.push, short] }] }
+                  - set: [idx, { +: [idx, 1] }]
+            - decl: [out, string, ""]
+            - decl: [jdx, i32, 0]
+            - while:
+                condition: { lt: [jdx, seen.len] }
+                body:
+                  - if: { condition: { gt: [out.len, 0] }, then: [{ set: [out, "${out},"] }] }
+                  - set: [out, "${out}${{ call: [seen.get, jdx] }}"]
+                  - set: [jdx, { +: [jdx, 1] }]
+            - return: [out]
+
+      # ── LDAP ──────────────────────────────────────────────────────────────
+      - def:
+          name: ldap_check
+          args: [[user, string], [password, string]]
+          return: museum.identity.Identity
+          body:
+            - decl: [out, museum.identity.Identity]
+            - if:
+                condition: { or: [{ eq: [<.ldap_url.len, 0] }, { or: [{ eq: [user.len, 0] }, { eq: [password.len, 0] }] }] }
+                then:
+                  - return: [out]
+            - decl: [conn, ldap_handle, { call: [ldap.open, <.ldap_url] }]
+            - if:
+                condition: { eq: [conn, null] }
+                then:
+                  - set: [out.error, "ldap url unusable"]
+                  - return: [out]
+            - call: [conn.set_timeout, 5000]
+            - if:
+                condition: { eq: [<.ldap_start_tls, 1] }
+                then:
+                  - if:
+                      condition: { neq: [{ call: [conn.start_tls] }, 1] }
+                      then:
+                        - set: [out.error, "ldap StartTLS failed"]
+                        - call: [conn.close]
+                        - return: [out]
+            - decl: [user_dn, string, ""]
+            - if:
+                condition: { gt: [<.ldap_search_base.len, 0] }
+                then:
+                  - if:
+                      condition: { gt: [<.ldap_bind_dn.len, 0] }
+                      then:
+                        - decl: [svc_raw, string, ""]
+                        - if: { condition: { call: [io.exists, <.ldap_bind_pw_file] }, then: [{ set: [svc_raw, { call: [io.read_file, <.ldap_bind_pw_file] }] }] }
+                        - decl: [svc_pw, string, { call: [svc_raw.trim] }]
+                        - if:
+                            condition: { neq: [{ call: [conn.bind, <.ldap_bind_dn, svc_pw] }, 1] }
+                            then:
+                              - decl: [svc_err, string, { call: [conn.error] }]
+                              - call: [log.error, "ldap service bind ${<.ldap_bind_dn}: ${svc_err}"]
+                              - set: [out.error, "ldap service bind failed"]
+                              - call: [conn.close]
+                              - return: [out]
+                  - decl: [flt, string, { call: [<.ldap_search_filter.replace, "{user}", { call: [ldap.escape_filter, user] }] }]
+                  - decl: [dns, list<string>, { call: [conn.search_dns, <.ldap_search_base, flt] }]
+                  - if:
+                      condition: { neq: [dns.len, 1] }
+                      then:
+                        - call: [conn.close]
+                        - return: [out]
+                  - set: [user_dn, { call: [dns.get, 0] }]
+                else:
+                  - set: [user_dn, { call: [<.ldap_user_dn.replace, "{user}", { call: [ldap.escape_dn, user] }] }]
+            - decl: [bound, i32, { call: [conn.bind, user_dn, password] }]
+            - if:
+                condition: { neq: [bound, 1] }
+                then:
+                  - if:
+                      condition: { lt: [bound, 0] }
+                      then:
+                        - decl: [bind_err, string, { call: [conn.error] }]
+                        - call: [log.error, "ldap ${<.ldap_url}: ${bind_err}"]
+                        - set: [out.error, "ldap unreachable"]
+                  - call: [conn.close]
+                  - return: [out]
+            - decl: [raw_groups, list<string>, { call: [conn.attr_values, user_dn, <.ldap_group_attr] }]
+            - call: [conn.close]
+            - set: [out.valid, 1]
+            - set: [out.name, user]
+            - set: [out.groups, { call: [<.groups_csv, raw_groups] }]
+            - return: [out]
+
+      # ── SAML ──────────────────────────────────────────────────────────────
+      # IdP redirect URL for a new login (HTTP-Redirect binding).
+      - def:
+          name: saml_begin
+          args: [[relay_state, string]]
+          return: string
+          body:
+            - if:
+                condition: { eq: [<.saml_sso_url.len, 0] }
+                then:
+                  - return: [""]
+            - decl: [rid, string, { call: [saml.new_request_id] }]
+            - call: [<.pending.put, rid, { +: [{ call: [time.now] }, 600000] }]
+            - return: [{ call: [saml.authn_request_url, <.saml_sso_url, <.saml_sp_id, <.saml_acs_url, rid, relay_state] }]
+
+      # Verifies a SAMLResponse (base64, POST binding).
+      - def:
+          name: saml_finish
+          args: [[response_b64, string]]
+          return: museum.identity.Identity
+          body:
+            - decl: [out, museum.identity.Identity]
+            - if:
+                condition: { eq: [<.saml_sso_url.len, 0] }
+                then:
+                  - set: [out.error, "saml is not configured"]
+                  - return: [out]
+            - decl: [cert, string, { call: [io.read_file, <.saml_cert_file] }]
+            # "" = the builtin reports InResponseTo; the decision is here: only
+            # an id this process issued counts, once.
+            - decl: [res, map<string:string>, { call: [saml.verify_response, response_b64, cert, <.saml_sp_id, <.saml_acs_url, ""] }]
+            - if:
+                condition: { neq: [{ call: [res.get, "ok"] }, "1"] }
+                then:
+                  - set: [out.error, { call: [res.get, "error"] }]
+                  - return: [out]
+            - decl: [rid, string, { call: [res.get, "request_id"] }]
+            - decl: [fresh, i32, 0]
+            - if:
+                condition: { and: [{ gt: [rid.len, 0] }, { eq: [{ call: [<.pending.contains, rid] }, 1] }] }
+                then:
+                  - decl: [until, i64, { call: [<.pending.get, rid] }]
+                  - call: [<.pending.remove, rid]
+                  - if: { condition: { ge: [until, { call: [time.now] }] }, then: [{ set: [fresh, 1] }] }
+            - if:
+                condition: { eq: [fresh, 0] }
+                then:
+                  - set: [out.error, "response does not answer an open login request"]
+                  - return: [out]
+            - if:
+                condition: { gt: [<.saml_idp_id.len, 0] }
+                then:
+                  - decl: [issuer, string, { call: [res.get, "issuer"] }]
+                  - if:
+                      condition: { neq: [issuer, <.saml_idp_id] }
+                      then:
+                        - set: [out.error, "unexpected issuer"]
+                        - return: [out]
+            - decl: [name, string, { call: [res.get, "name_id"] }]
+            - decl: [group_list, list<string>]
+            - if:
+                condition: { gt: [<.saml_group_attr.len, 0] }
+                then:
+                  - decl: [gkey, string, "attr.${<.saml_group_attr}"]
+                  - if:
+                      condition: { eq: [{ call: [res.contains, gkey] }, 1] }
+                      then:
+                        - decl: [gall, string, { call: [res.get, gkey] }]
+                        - set: [group_list, { call: [gall.split, "\n"] }]
+            - set: [out.valid, 1]
+            - set: [out.name, name]
+            - set: [out.groups, { call: [<.groups_csv, group_list] }]
+            - return: [out]
