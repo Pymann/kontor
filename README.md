@@ -30,8 +30,8 @@ in the Exodus repo); museum is the cross-project layer.
 
 museum targets aiml's **`mem-v3-compiler`** branch (memV3 ownership model,
 spec/61) plus the branches listed under [aiml requirements](#aiml-requirements).
-`ecosystem/integration-memv3` in the aiml repo is `mem-v3-compiler` with all of
-them merged; museum (and cosmos) pass their tests on it.
+Since 2026-10-28 (34c3340) all of them are merged into `mem-v3-compiler`
+itself; museum (and cosmos) pass their tests on it.
 
 ```bash
 aiml museum.aiml -- 8081 ./data      # port and data directory (defaults: 8081, ./data)
