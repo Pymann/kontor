@@ -1,6 +1,6 @@
-# museum.text — JSON output helpers, version ordering and path-segment checks.
+# kontor.text — JSON output helpers, version ordering and path-segment checks.
 
-- namespace: museum.text
+- namespace: kontor.text
 
 # JSON string literal with quotes; escapes backslash, quote and control newlines.
 - def:
@@ -28,7 +28,7 @@
           condition: { lt: [idx, items.len] }
           body:
             - decl: [item, string, { call: [items.get, idx] }]
-            - decl: [quoted, string, { call: [museum.text.json_str, item] }]
+            - decl: [quoted, string, { call: [kontor.text.json_str, item] }]
             - if:
                 condition: { gt: [idx, 0] }
                 then:
@@ -128,7 +128,7 @@
           body:
             - decl: [seg, string, { call: [segs.get, idx] }]
             - if:
-                condition: { eq: [{ call: [museum.text.safe_segment, seg] }, 0] }
+                condition: { eq: [{ call: [kontor.text.safe_segment, seg] }, 0] }
                 then:
                   - return: [0]
             - set: [idx, { +: [idx, 1] }]

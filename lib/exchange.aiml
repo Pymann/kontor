@@ -1,6 +1,6 @@
-# museum.http — one request/response pair with the helpers handlers need.
+# kontor.http — one request/response pair with the helpers handlers need.
 
-- namespace: museum.http
+- namespace: kontor.http
 
 - import: "text.aiml"
 
@@ -148,8 +148,8 @@
           name: error
           args: [[status, i32], [message, string]]
           body:
-            - decl: [msg_json, string, { call: [museum.text.json_str, message] }]
-            - decl: [code, string, { call: [museum.http.error_code, status] }]
+            - decl: [msg_json, string, { call: [kontor.text.json_str, message] }]
+            - decl: [code, string, { call: [kontor.http.error_code, status] }]
             - call: [<.json, status, "{\"error\":${msg_json},\"code\":\"${code}\"}"]
 
       # Streams a file (Range-aware) with the given content type.

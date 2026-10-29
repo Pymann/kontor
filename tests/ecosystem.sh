@@ -1,5 +1,5 @@
 #!/bin/bash
-# End-to-end test of museum's ecosystem half (doc/ecosystem.md): the OCI
+# End-to-end test of kontor's ecosystem half (doc/ecosystem.md): the OCI
 # registry under /v2/ (curl + skopeo), cosmos stage layers (§3) and webhooks
 # (§4) with signature-verifying receivers.
 #   AIML_BIN=/path/to/aiml tests/ecosystem.sh
@@ -37,7 +37,7 @@ SECRET_A="secret-for-receiver-a"; SECRET_B="secret-for-receiver-b"
 touch "$WORK/a.jsonl" "$WORK/b.jsonl"
 python3 tests/webhook_receiver.py "$HOOK_A" "$SECRET_A" "$WORK/a.jsonl" 0 & PIDS="$PIDS $!"
 python3 tests/webhook_receiver.py "$HOOK_B" "$SECRET_B" "$WORK/b.jsonl" 2 & PIDS="$PIDS $!"
-MUSEUM_ADMIN_TOKEN="$TOKEN" "$AIML_BIN" museum.aiml -- "$PORT" "$DATA" > "$WORK/server.log" 2>&1 & PIDS="$PIDS $!"
+KONTOR_ADMIN_TOKEN="$TOKEN" "$AIML_BIN" kontor.aiml -- "$PORT" "$DATA" > "$WORK/server.log" 2>&1 & PIDS="$PIDS $!"
 wait_for "${STARTUP_WAIT:-20}" 'curl -s -o /dev/null "$BASE/api/health"'
 
 echo "webhooks: subscribe"
@@ -52,7 +52,7 @@ check "list has no secrets" "$(grep -c "$SECRET_A" "$WORK/body")" "0"
 wait_for 10 '[ "$(hooklog "$WORK/a.jsonl" "len(r)")" -ge 1 ]'
 check "ping delivered to A" "$(hooklog "$WORK/a.jsonl" "(r[0]['event'], r[0]['body']['event'], r[0]['body']['data'])")" "('ping', 'ping', {})"
 check "ping signature valid" "$(hooklog "$WORK/a.jsonl" "r[0]['signature_ok']")" "True"
-check "ping envelope" "$(hooklog "$WORK/a.jsonl" "sorted(r[0]['body'].keys())")" "['data', 'delivery', 'event', 'museum', 'timestamp_ms']"
+check "ping envelope" "$(hooklog "$WORK/a.jsonl" "sorted(r[0]['body'].keys())")" "['data', 'delivery', 'event', 'kontor', 'timestamp_ms']"
 check "content type" "$(hooklog "$WORK/a.jsonl" "r[0]['content_type']")" "application/json"
 check "test endpoint" "$(status -X POST "$BASE/api/v1/webhooks/$SUB_A/test")" "202"
 wait_for 10 '[ "$(hooklog "$WORK/a.jsonl" "len(r)")" -ge 2 ]'
@@ -60,7 +60,7 @@ check "test ping delivered" "$(hooklog "$WORK/a.jsonl" "r[1]['event']")" "ping"
 
 echo "registry: protocol (curl)"
 check "GET /v2/ without credentials -> 401" "$(anon "$BASE/v2/")" "401"
-check "Basic challenge" "$(hdr www-authenticate)" 'Basic realm="museum"'
+check "Basic challenge" "$(hdr www-authenticate)" 'Basic realm="kontor"'
 check "api version header" "$(hdr docker-distribution-api-version)" "registry/2.0"
 check "GET /v2/ with token" "$(status "$BASE/v2/")" "200"
 check "GET /v2/ with basic admin:token" "$(anon -u "admin:$TOKEN" "$BASE/v2/")" "200"
@@ -135,12 +135,12 @@ if command -v skopeo > /dev/null; then
     python3 tests/fixtures/oci/make_layout.py image "$WORK/layout" > "$WORK/img.digest"
     SK=(--src-tls-verify=false --dest-tls-verify=false)
     check "skopeo push without creds fails" "$(skopeo copy "${SK[@]}" "oci:$WORK/layout:1.0" "docker://$REG/demo/hello:1.0" > /dev/null 2>&1; echo $?)" "1"
-    check "skopeo copy oci -> museum" "$(skopeo copy "${SK[@]}" --dest-creds "admin:$TOKEN" "oci:$WORK/layout:1.0" "docker://$REG/demo/hello:1.0" > "$WORK/sk.log" 2>&1; echo $?)" "0"
+    check "skopeo copy oci -> kontor" "$(skopeo copy "${SK[@]}" --dest-creds "admin:$TOKEN" "oci:$WORK/layout:1.0" "docker://$REG/demo/hello:1.0" > "$WORK/sk.log" 2>&1; echo $?)" "0"
     [ "$FAILS" -eq 0 ] || tail -5 "$WORK/sk.log"
     skopeo inspect --tls-verify=false "docker://$REG/demo/hello:1.0" > "$WORK/inspect.json" 2>&1
     check "skopeo inspect (anonymous)" "$(json "$WORK/inspect.json" "(j['Digest'], len(j['Layers']), j['Os'])")" "($(python3 -c "print(repr('$(cat "$WORK/img.digest")'))"), 1, 'linux')"
     check "skopeo inspect --raw" "$(skopeo inspect --tls-verify=false --creds "admin:$TOKEN" --raw "docker://$REG/demo/hello:1.0" | sha256sum | cut -d' ' -f1)" "$(cut -d: -f2 "$WORK/img.digest")"
-    check "skopeo copy museum -> oci" "$(skopeo copy "${SK[@]}" --src-creds "admin:$TOKEN" "docker://$REG/demo/hello:1.0" "oci:$WORK/back:1.0" > "$WORK/sk2.log" 2>&1; echo $?)" "0"
+    check "skopeo copy kontor -> oci" "$(skopeo copy "${SK[@]}" --src-creds "admin:$TOKEN" "docker://$REG/demo/hello:1.0" "oci:$WORK/back:1.0" > "$WORK/sk2.log" 2>&1; echo $?)" "0"
     check "roundtrip blobs identical" "$(cd "$WORK/layout/blobs/sha256" && ls | sort | tr '\n' ' ')" "$(cd "$WORK/back/blobs/sha256" && ls | sort | tr '\n' ' ')"
     check "skopeo list-tags" "$(skopeo list-tags --tls-verify=false "docker://$REG/demo/hello" | python3 -c 'import json,sys; print(json.load(sys.stdin)["Tags"])')" "['1.0']"
     check "skopeo copy registry -> registry tag" "$(skopeo copy "${SK[@]}" --src-creds "admin:$TOKEN" --dest-creds "admin:$TOKEN" "docker://$REG/demo/hello:1.0" "docker://$REG/demo/hello:stable" > /dev/null 2>&1; echo $?)" "0"
@@ -196,7 +196,7 @@ check "A: manifest.published deps" "$(hooklog "$WORK/a.jsonl" "[x['body']['data'
 check "A: package.published impact" "$(hooklog "$WORK/a.jsonl" "[x['body']['data']['impact']['needs'] for x in r if x['event']=='package.published'][0]")" "{'app': ['core', 'net'], 'core': ['zlib-lite'], 'legacy': ['core'], 'net': ['core']}"
 check "A: all signatures valid" "$(hooklog "$WORK/a.jsonl" "all(x['signature_ok'] for x in r)")" "True"
 check "A: delivery ids unique" "$(hooklog "$WORK/a.jsonl" "len(set(x['delivery'] for x in r)) == len(r)")" "True"
-echo "  (receiver B fails twice; museum retries after 1 s and 5 s)"
+echo "  (receiver B fails twice; kontor retries after 1 s and 5 s)"
 wait_for 25 '[ "$(hooklog "$WORK/b.jsonl" "len([x for x in r if x[\"event\"]==\"package.published\"])")" = 3 ]'
 check "B: three attempts, same delivery" "$(hooklog "$WORK/b.jsonl" "[(x['status'], x['event']) for x in r if x['event']!='ping']")" "[(500, 'package.published'), (500, 'package.published'), (200, 'package.published')]"
 check "B: one delivery id" "$(hooklog "$WORK/b.jsonl" "len(set(x['delivery'] for x in r if x['event']!='ping'))")" "1"

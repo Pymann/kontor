@@ -1,4 +1,4 @@
-# museum.oci — OCI Distribution Spec v1.1 registry (pull + push) on museum's
+# kontor.oci — OCI Distribution Spec v1.1 registry (pull + push) on kontor's
 # content-addressed store (contract doc/ecosystem.md §2/§3).
 #
 # Layout below <data>/oci/:
@@ -6,14 +6,14 @@
 #   repos/<name with "/" → "+">/manifests/<hex>     media type of that manifest (membership)
 #   uploads/<uuid>                                  upload session data
 #   uploads/<uuid>.repo                             repository the session belongs to
-# Blob and manifest bytes live in <data>/cas/ like every other museum blob, so
+# Blob and manifest bytes live in <data>/cas/ like every other kontor blob, so
 # an image layer that is also a package or generic file is stored once.
 #
-# Authorization happens in museum.api before these methods are called.
+# Authorization happens in kontor.api before these methods are called.
 # Published manifests are reported in `events` ("<event>\t<data json>") for
 # the webhook hub; the caller drains the list.
 
-- namespace: museum.oci
+- namespace: kontor.oci
 
 - import: "text.aiml"
 - import: "store.aiml"
@@ -80,7 +80,7 @@
           condition: { lt: [idx, comps.len] }
           body:
             - if:
-                condition: { eq: [{ call: [museum.oci.valid_component, { call: [comps.get, idx] }] }, 0] }
+                condition: { eq: [{ call: [kontor.oci.valid_component, { call: [comps.get, idx] }] }, 0] }
                 then:
                   - return: [0]
             - set: [idx, { +: [idx, 1] }]
@@ -162,23 +162,23 @@
 - def:
     name: parse_route
     args: [[url_path, string]]
-    return: museum.oci.Route
+    return: kontor.oci.Route
     body:
-      - decl: [route, museum.oci.Route]
+      - decl: [route, kontor.oci.Route]
       - decl: [parts, list<string>, { call: [url_path.split, "/"] }]
       - decl: [count, i32, parts.len]
       # parts[0] = "", parts[1] = "v2"
       - if:
-          condition: { or: [{ lt: [count, 3] }, { eq: [{ call: [museum.oci.is_word, { call: [parts.get, 1] }, "v2"] }, 0] }] }
+          condition: { or: [{ lt: [count, 3] }, { eq: [{ call: [kontor.oci.is_word, { call: [parts.get, 1] }, "v2"] }, 0] }] }
           then:
             - return: [route]
       - if:
-          condition: { and: [{ eq: [count, 3] }, { eq: [{ call: [museum.oci.is_word, { call: [parts.get, 2] }, ""] }, 1] }] }
+          condition: { and: [{ eq: [count, 3] }, { eq: [{ call: [kontor.oci.is_word, { call: [parts.get, 2] }, ""] }, 1] }] }
           then:
             - set: [route.kind, 1]
             - return: [route]
       - if:
-          condition: { and: [{ eq: [count, 3] }, { eq: [{ call: [museum.oci.is_word, { call: [parts.get, 2] }, "_catalog"] }, 1] }] }
+          condition: { and: [{ eq: [count, 3] }, { eq: [{ call: [kontor.oci.is_word, { call: [parts.get, 2] }, "_catalog"] }, 1] }] }
           then:
             - set: [route.kind, 2]
             - return: [route]
@@ -191,27 +191,27 @@
       - decl: [third, string, { call: [parts.get, { -: [count, 3] }] }]
       - decl: [name_end, i32, 0]
       - if:
-          condition: { and: [{ eq: [{ call: [museum.oci.is_word, second, "tags"] }, 1] }, { eq: [{ call: [museum.oci.is_word, last, "list"] }, 1] }] }
+          condition: { and: [{ eq: [{ call: [kontor.oci.is_word, second, "tags"] }, 1] }, { eq: [{ call: [kontor.oci.is_word, last, "list"] }, 1] }] }
           then:
             - set: [route.kind, 3]
             - set: [name_end, { -: [count, 2] }]
           else:
             - if:
-                condition: { and: [{ eq: [{ call: [museum.oci.is_word, third, "blobs"] }, 1] }, { eq: [{ call: [museum.oci.is_word, second, "uploads"] }, 1] }] }
+                condition: { and: [{ eq: [{ call: [kontor.oci.is_word, third, "blobs"] }, 1] }, { eq: [{ call: [kontor.oci.is_word, second, "uploads"] }, 1] }] }
                 then:
                   - set: [route.kind, 5]
                   - set: [route.ref, last]
                   - set: [name_end, { -: [count, 3] }]
                 else:
                   - if:
-                      condition: { eq: [{ call: [museum.oci.is_word, second, "blobs"] }, 1] }
+                      condition: { eq: [{ call: [kontor.oci.is_word, second, "blobs"] }, 1] }
                       then:
                         - set: [route.kind, 4]
                         - set: [route.ref, last]
                         - set: [name_end, { -: [count, 2] }]
                       else:
                         - if:
-                            condition: { eq: [{ call: [museum.oci.is_word, second, "manifests"] }, 1] }
+                            condition: { eq: [{ call: [kontor.oci.is_word, second, "manifests"] }, 1] }
                             then:
                               - set: [route.kind, 6]
                               - set: [route.ref, last]
@@ -233,7 +233,7 @@
             - set: [repo, "${repo}${{ call: [parts.get, idx] }}"]
             - set: [idx, { +: [idx, 1] }]
       - if:
-          condition: { eq: [{ call: [museum.oci.valid_name, repo] }, 0] }
+          condition: { eq: [{ call: [kontor.oci.valid_name, repo] }, 0] }
           then:
             - set: [route.kind, 0]
             - return: [route]
@@ -264,10 +264,10 @@
       # OCI error body: {"errors":[{"code","message","detail":{}}]}
       - def:
           name: fail
-          args: [[xch, ref<museum.http.Exchange>], [status, i32], [code, string], [message, string]]
+          args: [[xch, ref<kontor.http.Exchange>], [status, i32], [code, string], [message, string]]
           body:
-            - decl: [code_json, string, { call: [museum.text.json_str, code] }]
-            - decl: [msg_json, string, { call: [museum.text.json_str, message] }]
+            - decl: [code_json, string, { call: [kontor.text.json_str, code] }]
+            - decl: [msg_json, string, { call: [kontor.text.json_str, message] }]
             - call: [xch.json, status, "{\"errors\":[{\"code\":${code_json},\"message\":${msg_json},\"detail\":{}}]}"]
 
       - def:
@@ -276,7 +276,7 @@
           return: i32
           body:
             - if:
-                condition: { call: [io.exists, { call: [museum.store.blob_path, <.data_dir, hex] }] }
+                condition: { call: [io.exists, { call: [kontor.store.blob_path, <.data_dir, hex] }] }
                 then:
                   - return: [1]
             - return: [0]
@@ -284,9 +284,9 @@
       # ── blobs ────────────────────────────────────────────────────────────
       - def:
           name: get_blob
-          args: [[xch, ref<museum.http.Exchange>], [route, museum.oci.Route]]
+          args: [[xch, ref<kontor.http.Exchange>], [route, kontor.oci.Route]]
           body:
-            - decl: [hex, string, { call: [museum.oci.digest_hex, route.ref] }]
+            - decl: [hex, string, { call: [kontor.oci.digest_hex, route.ref] }]
             - if:
                 condition: { eq: [hex.len, 0] }
                 then:
@@ -298,7 +298,7 @@
                   - call: [<.fail, xch, 404, "BLOB_UNKNOWN", "blob unknown to registry"]
                   - return: []
             - call: [xch.set_header, "docker-content-digest", route.ref]
-            - call: [xch.file, { call: [museum.store.blob_path, <.data_dir, hex] }, "application/octet-stream"]
+            - call: [xch.file, { call: [kontor.store.blob_path, <.data_dir, hex] }, "application/octet-stream"]
 
       # Moves the file `src` into the CAS as blob `hex` (or drops it when the
       # blob is already there).  `src` must already hash to `hex`.
@@ -306,7 +306,7 @@
           name: adopt_file
           args: [[src, string], [hex, string]]
           body:
-            - decl: [final_path, string, { call: [museum.store.blob_path, <.data_dir, hex] }]
+            - decl: [final_path, string, { call: [kontor.store.blob_path, <.data_dir, hex] }]
             - if:
                 condition: { call: [io.exists, final_path] }
                 then:
@@ -338,9 +338,9 @@
       # answers 201.  `src` is consumed either way.
       - def:
           name: commit_blob
-          args: [[xch, ref<museum.http.Exchange>], [repo, string], [src, string], [digest, string]]
+          args: [[xch, ref<kontor.http.Exchange>], [repo, string], [src, string], [digest, string]]
           body:
-            - decl: [hex, string, { call: [museum.oci.digest_hex, digest] }]
+            - decl: [hex, string, { call: [kontor.oci.digest_hex, digest] }]
             - if:
                 condition: { eq: [hex.len, 0] }
                 then:
@@ -362,14 +362,14 @@
       # POST /v2/<name>/blobs/uploads/  — mount, monolithic (?digest=) or session start.
       - def:
           name: start_upload
-          args: [[xch, ref<museum.http.Exchange>], [route, museum.oci.Route]]
+          args: [[xch, ref<kontor.http.Exchange>], [route, kontor.oci.Route]]
           body:
             - call: [io.mkdir_all, { call: [<.upload_dir] }]
             - decl: [mount, string, { call: [xch.query, "mount"] }]
             - if:
                 condition: { gt: [mount.len, 0] }
                 then:
-                  - decl: [mhex, string, { call: [museum.oci.digest_hex, mount] }]
+                  - decl: [mhex, string, { call: [kontor.oci.digest_hex, mount] }]
                   # One store for all repositories: a known blob mounts into any repository.
                   - if:
                       condition: { and: [{ gt: [mhex.len, 0] }, { eq: [{ call: [<.blob_exists, mhex] }, 1] }] }
@@ -401,7 +401,7 @@
       # Session data file for `uuid` in `repo`, or "" (an error was sent).
       - def:
           name: session_path
-          args: [[xch, ref<museum.http.Exchange>], [route, museum.oci.Route]]
+          args: [[xch, ref<kontor.http.Exchange>], [route, kontor.oci.Route]]
           return: string
           body:
             - decl: [uuid, string, route.ref]
@@ -437,7 +437,7 @@
       # Appends the request body to the session file.  Returns 0 or -1.
       - def:
           name: append_body
-          args: [[xch, ref<museum.http.Exchange>], [data_path, string]]
+          args: [[xch, ref<kontor.http.Exchange>], [data_path, string]]
           return: i32
           body:
             - if:
@@ -465,7 +465,7 @@
       # PATCH: append a chunk.  GET: report progress.  PUT: finalize.  DELETE: cancel.
       - def:
           name: patch_upload
-          args: [[xch, ref<museum.http.Exchange>], [route, museum.oci.Route]]
+          args: [[xch, ref<kontor.http.Exchange>], [route, kontor.oci.Route]]
           body:
             - decl: [data_path, string, { call: [<.session_path, xch, route] }]
             - if:
@@ -502,7 +502,7 @@
 
       - def:
           name: upload_status
-          args: [[xch, ref<museum.http.Exchange>], [route, museum.oci.Route]]
+          args: [[xch, ref<kontor.http.Exchange>], [route, kontor.oci.Route]]
           body:
             - decl: [data_path, string, { call: [<.session_path, xch, route] }]
             - if:
@@ -516,7 +516,7 @@
 
       - def:
           name: finish_upload
-          args: [[xch, ref<museum.http.Exchange>], [route, museum.oci.Route]]
+          args: [[xch, ref<kontor.http.Exchange>], [route, kontor.oci.Route]]
           body:
             - decl: [data_path, string, { call: [<.session_path, xch, route] }]
             - if:
@@ -539,7 +539,7 @@
 
       - def:
           name: cancel_upload
-          args: [[xch, ref<museum.http.Exchange>], [route, museum.oci.Route]]
+          args: [[xch, ref<kontor.http.Exchange>], [route, kontor.oci.Route]]
           body:
             - decl: [data_path, string, { call: [<.session_path, xch, route] }]
             - if:
@@ -558,7 +558,7 @@
           return: string
           body:
             - decl: [dir, string, { call: [<.repo_dir, repo] }]
-            - decl: [hex, string, { call: [museum.oci.digest_hex, ref] }]
+            - decl: [hex, string, { call: [kontor.oci.digest_hex, ref] }]
             - if:
                 condition: { gt: [hex.len, 0] }
                 then:
@@ -568,14 +568,14 @@
                         - return: [ref]
                   - return: [""]
             - if:
-                condition: { eq: [{ call: [museum.oci.valid_tag, ref] }, 0] }
+                condition: { eq: [{ call: [kontor.oci.valid_tag, ref] }, 0] }
                 then:
                   - return: [""]
-            - return: [{ call: [museum.store.read_text, "${dir}/tags/${ref}"] }]
+            - return: [{ call: [kontor.store.read_text, "${dir}/tags/${ref}"] }]
 
       - def:
           name: get_manifest
-          args: [[xch, ref<museum.http.Exchange>], [route, museum.oci.Route]]
+          args: [[xch, ref<kontor.http.Exchange>], [route, kontor.oci.Route]]
           body:
             - decl: [digest, string, { call: [<.resolve, route.repo, route.ref] }]
             - if:
@@ -583,10 +583,10 @@
                 then:
                   - call: [<.fail, xch, 404, "MANIFEST_UNKNOWN", "manifest unknown"]
                   - return: []
-            - decl: [hex, string, { call: [museum.oci.digest_hex, digest] }]
-            - decl: [media, string, { call: [museum.store.read_text, "${{ call: [<.repo_dir, route.repo] }}/manifests/${hex}"] }]
+            - decl: [hex, string, { call: [kontor.oci.digest_hex, digest] }]
+            - decl: [media, string, { call: [kontor.store.read_text, "${{ call: [<.repo_dir, route.repo] }}/manifests/${hex}"] }]
             - call: [xch.set_header, "docker-content-digest", digest]
-            - call: [xch.file, { call: [museum.store.blob_path, <.data_dir, hex] }, media]
+            - call: [xch.file, { call: [kontor.store.blob_path, <.data_dir, hex] }, media]
 
       # Missing blobs referenced by an image manifest (config + layers) or
       # manifests referenced by an index, as a comma list ("" = all present).
@@ -603,7 +603,7 @@
                 condition: { gt: [config_digest.len, 0] }
                 then:
                   - if:
-                      condition: { eq: [{ call: [<.blob_exists, { call: [museum.oci.digest_hex, config_digest] }] }, 0] }
+                      condition: { eq: [{ call: [<.blob_exists, { call: [kontor.oci.digest_hex, config_digest] }] }, 0] }
                       then:
                         - set: [missing, config_digest]
             - decl: [layers, ref<yaml_node>, { call: [yaml.get, root, "layers"] }]
@@ -614,7 +614,7 @@
                 body:
                   - decl: [ldigest, string, { call: [yaml.scalar, { call: [yaml.get, { call: [yaml.item, layers, lidx] }, "digest"] }] }]
                   - if:
-                      condition: { eq: [{ call: [<.blob_exists, { call: [museum.oci.digest_hex, ldigest] }] }, 0] }
+                      condition: { eq: [{ call: [<.blob_exists, { call: [kontor.oci.digest_hex, ldigest] }] }, 0] }
                       then:
                         - set: [missing, "${missing},${ldigest}"]
                   - set: [lidx, { +: [lidx, 1] }]
@@ -626,7 +626,7 @@
                 body:
                   - decl: [cdigest, string, { call: [yaml.scalar, { call: [yaml.get, { call: [yaml.item, children, cidx] }, "digest"] }] }]
                   - if:
-                      condition: { eq: [{ call: [<.blob_exists, { call: [museum.oci.digest_hex, cdigest] }] }, 0] }
+                      condition: { eq: [{ call: [<.blob_exists, { call: [kontor.oci.digest_hex, cdigest] }] }, 0] }
                       then:
                         - set: [missing, "${missing},${cdigest}"]
                   - set: [cidx, { +: [cidx, 1] }]
@@ -635,16 +635,16 @@
 
       - def:
           name: put_manifest
-          args: [[xch, ref<museum.http.Exchange>], [route, museum.oci.Route]]
+          args: [[xch, ref<kontor.http.Exchange>], [route, kontor.oci.Route]]
           body:
-            - decl: [ref_hex, string, { call: [museum.oci.digest_hex, route.ref] }]
+            - decl: [ref_hex, string, { call: [kontor.oci.digest_hex, route.ref] }]
             - decl: [is_digest, i32, 0]
             - if:
                 condition: { gt: [ref_hex.len, 0] }
                 then:
                   - set: [is_digest, 1]
             - if:
-                condition: { and: [{ eq: [is_digest, 0] }, { eq: [{ call: [museum.oci.valid_tag, route.ref] }, 0] }] }
+                condition: { and: [{ eq: [is_digest, 0] }, { eq: [{ call: [kontor.oci.valid_tag, route.ref] }, 0] }] }
                 then:
                   - call: [<.fail, xch, 400, "TAG_INVALID", "invalid tag"]
                   - return: []
@@ -704,17 +704,17 @@
                   - return: []
             - call: [<.adopt_file, tmp_path, hex]
             - decl: [dir, string, { call: [<.repo_dir, route.repo] }]
-            - call: [museum.store.write_text, <.data_dir, "${dir}/manifests", hex, media]
+            - call: [kontor.store.write_text, <.data_dir, "${dir}/manifests", hex, media]
             - decl: [tag, string, ""]
             - if:
                 condition: { eq: [is_digest, 0] }
                 then:
                   - set: [tag, route.ref]
-                  - call: [museum.store.write_text, <.data_dir, "${dir}/tags", tag, digest]
-            - decl: [repo_json, string, { call: [museum.text.json_str, route.repo] }]
-            - decl: [tag_json, string, { call: [museum.text.json_str, tag] }]
-            - decl: [media_json, string, { call: [museum.text.json_str, media] }]
-            - decl: [art_json, string, { call: [museum.text.json_str, artifact] }]
+                  - call: [kontor.store.write_text, <.data_dir, "${dir}/tags", tag, digest]
+            - decl: [repo_json, string, { call: [kontor.text.json_str, route.repo] }]
+            - decl: [tag_json, string, { call: [kontor.text.json_str, tag] }]
+            - decl: [media_json, string, { call: [kontor.text.json_str, media] }]
+            - decl: [art_json, string, { call: [kontor.text.json_str, artifact] }]
             - call: [<.events.push, "image.pushed\t{\"repository\":${repo_json},\"tag\":${tag_json},\"digest\":\"${digest}\",\"media_type\":${media_json},\"artifact_type\":${art_json}}"]
             - call: [log.info, "oci PUT ${route.repo}:${route.ref} → ${digest}"]
             - call: [xch.set_header, "location", "/v2/${route.repo}/manifests/${digest}"]
@@ -726,15 +726,15 @@
       # in the CAS (shared store; garbage collection is a separate concern).
       - def:
           name: delete_manifest
-          args: [[xch, ref<museum.http.Exchange>], [route, museum.oci.Route]]
+          args: [[xch, ref<kontor.http.Exchange>], [route, kontor.oci.Route]]
           body:
             - decl: [dir, string, { call: [<.repo_dir, route.repo] }]
-            - decl: [hex, string, { call: [museum.oci.digest_hex, route.ref] }]
+            - decl: [hex, string, { call: [kontor.oci.digest_hex, route.ref] }]
             - if:
                 condition: { eq: [hex.len, 0] }
                 then:
                   - if:
-                      condition: { or: [{ eq: [{ call: [museum.oci.valid_tag, route.ref] }, 0] }, { not: [{ call: [io.exists, "${dir}/tags/${route.ref}"] }] }] }
+                      condition: { or: [{ eq: [{ call: [kontor.oci.valid_tag, route.ref] }, 0] }, { not: [{ call: [io.exists, "${dir}/tags/${route.ref}"] }] }] }
                       then:
                         - call: [<.fail, xch, 404, "MANIFEST_UNKNOWN", "manifest unknown"]
                         - return: []
@@ -747,14 +747,14 @@
                   - call: [<.fail, xch, 404, "MANIFEST_UNKNOWN", "manifest unknown"]
                   - return: []
             - call: [io.remove, "${dir}/manifests/${hex}"]
-            - decl: [tags, list<string>, { call: [museum.store.list_files, "${dir}/tags"] }]
+            - decl: [tags, list<string>, { call: [kontor.store.list_files, "${dir}/tags"] }]
             - decl: [tidx, i32, 0]
             - while:
                 condition: { lt: [tidx, tags.len] }
                 body:
                   - decl: [tag, string, { call: [tags.get, tidx] }]
                   - if:
-                      condition: { eq: [{ call: [museum.store.read_text, "${dir}/tags/${tag}"] }, route.ref] }
+                      condition: { eq: [{ call: [kontor.store.read_text, "${dir}/tags/${tag}"] }, route.ref] }
                       then:
                         - call: [io.remove, "${dir}/tags/${tag}"]
                   - set: [tidx, { +: [tidx, 1] }]
@@ -766,7 +766,7 @@
       # when there is more.
       - def:
           name: page_json
-          args: [[xch, ref<museum.http.Exchange>], [items, list<string>], [link_base, string]]
+          args: [[xch, ref<kontor.http.Exchange>], [items, list<string>], [link_base, string]]
           return: string
           body:
             - decl: [last, string, { call: [xch.query, "last"] }]
@@ -798,11 +798,11 @@
                 then:
                   - decl: [tail, string, { call: [page.get, { -: [page.len, 1] }] }]
                   - call: [xch.set_header, "link", "<${link_base}?n=${limit}&last=${tail}>; rel=\"next\""]
-            - return: [{ call: [museum.text.json_list, page] }]
+            - return: [{ call: [kontor.text.json_list, page] }]
 
       - def:
           name: list_tags
-          args: [[xch, ref<museum.http.Exchange>], [route, museum.oci.Route]]
+          args: [[xch, ref<kontor.http.Exchange>], [route, kontor.oci.Route]]
           body:
             - decl: [dir, string, { call: [<.repo_dir, route.repo] }]
             - if:
@@ -810,15 +810,15 @@
                 then:
                   - call: [<.fail, xch, 404, "NAME_UNKNOWN", "repository name not known to registry"]
                   - return: []
-            - decl: [tags, list<string>, { call: [museum.store.list_files, "${dir}/tags"] }]
+            - decl: [tags, list<string>, { call: [kontor.store.list_files, "${dir}/tags"] }]
             - decl: [page, string, { call: [<.page_json, xch, tags, "/v2/${route.repo}/tags/list"] }]
-            - call: [xch.json, 200, "{\"name\":${{ call: [museum.text.json_str, route.repo] }},\"tags\":${page}}"]
+            - call: [xch.json, 200, "{\"name\":${{ call: [kontor.text.json_str, route.repo] }},\"tags\":${page}}"]
 
       - def:
           name: repositories
           return: list<string>
           body:
-            - decl: [dirs, list<string>, { call: [museum.store.list_subdirs, "${<.data_dir}/oci/repos"] }]
+            - decl: [dirs, list<string>, { call: [kontor.store.list_subdirs, "${<.data_dir}/oci/repos"] }]
             - decl: [out, list<string>]
             - decl: [idx, i32, 0]
             - while:
@@ -832,7 +832,7 @@
 
       - def:
           name: catalog
-          args: [[xch, ref<museum.http.Exchange>]]
+          args: [[xch, ref<kontor.http.Exchange>]]
           body:
             - decl: [repos, list<string>, { call: [<.repositories] }]
             - decl: [page, string, { call: [<.page_json, xch, repos, "/v2/_catalog"] }]

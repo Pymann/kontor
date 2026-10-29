@@ -7,7 +7,7 @@
     args: [[data_dir, string], [name, string], [version, string]]
     body:
       - decl: [src_text, string, { call: [io.read_file, "tests/fixtures/${name}-${version}.exodus.json"] }]
-      - call: [museum.store.write_text, data_dir, "${data_dir}/exodus/${name}/${version}", "exodus.json", src_text]
+      - call: [kontor.store.write_text, data_dir, "${data_dir}/exodus/${name}/${version}", "exodus.json", src_text]
 
 - def:
     name: expect_contains
@@ -26,7 +26,7 @@
     name: main
     return: i32
     body:
-      - decl: [data_dir, string, "/tmp/museum_graph_test"]
+      - decl: [data_dir, string, "/tmp/kontor_graph_test"]
       - call: [io.remove_all, data_dir]
       - call: [stage, data_dir, "zlib-lite", "1.0.0"]
       - call: [stage, data_dir, "core", "1.0.0"]
@@ -35,7 +35,7 @@
       - call: [stage, data_dir, "tool", "1.0.0"]
       - call: [stage, data_dir, "legacy", "0.5.0"]
       - call: [stage, data_dir, "legacy", "1.0.0"]
-      - decl: [graph, ptr<museum.graph.DependencyGraph>, { new: museum.graph.DependencyGraph }]
+      - decl: [graph, ptr<kontor.graph.DependencyGraph>, { new: kontor.graph.DependencyGraph }]
       - call: [graph.load, data_dir]
 
       - decl: [fails, i32, 0]

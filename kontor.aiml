@@ -1,8 +1,8 @@
-# museum — artifact repository, OCI registry and webhook source for the
+# kontor — artifact repository, OCI registry and webhook source for the
 # exodus/cosmos ecosystem (doc/ecosystem.md is the contract).
 #
-#   aiml museum.aiml -- [port] [data_dir] [--admin-token-file <path>]
-#        (defaults: 8081 ./data; MUSEUM_ADMIN_TOKEN works like the file)
+#   aiml kontor.aiml -- [port] [data_dir] [--admin-token-file <path>]
+#        (defaults: 8081 ./data; KONTOR_ADMIN_TOKEN works like the file)
 #
 # Repositories
 #   generic   any file at any path, content-addressed (sha256, deduplicated)
@@ -16,8 +16,8 @@
 
 - import: "lib/api.aiml"
 
-- decl: [g_api, ptr<museum.api.RepositoryApi>]
-# The HTTP server runs one thread per connection; museum's state (graph
+- decl: [g_api, ptr<kontor.api.RepositoryApi>]
+# The HTTP server runs one thread per connection; kontor's state (graph
 # snapshot, files written in several steps) is guarded by one lock, held for
 # the whole handler.  Webhook delivery runs on its own thread outside it.
 - decl: [g_lock, lock]
@@ -28,9 +28,9 @@
 - def:
     name: wrap
     args: [[req, http_request_handle], [resp, http_response_handle]]
-    return: ptr<museum.http.Exchange>
+    return: ptr<kontor.http.Exchange>
     body:
-      - decl: [xch, ptr<museum.http.Exchange>, { new: museum.http.Exchange }]
+      - decl: [xch, ptr<kontor.http.Exchange>, { new: kontor.http.Exchange }]
       - set: [xch.req, req]
       - set: [xch.resp, resp]
       - return: [xch]
@@ -40,7 +40,7 @@
     args: [[req, http_request_handle], [resp, http_response_handle]]
     body:
       - call: [g_lock.acquire]
-      - decl: [xch, ptr<museum.http.Exchange>, { call: [wrap, req, resp] }]
+      - decl: [xch, ptr<kontor.http.Exchange>, { call: [wrap, req, resp] }]
       - call: [g_api.health, xch]
       - call: [g_lock.release]
 
@@ -49,7 +49,7 @@
     args: [[req, http_request_handle], [resp, http_response_handle]]
     body:
       - call: [g_lock.acquire]
-      - decl: [xch, ptr<museum.http.Exchange>, { call: [wrap, req, resp] }]
+      - decl: [xch, ptr<kontor.http.Exchange>, { call: [wrap, req, resp] }]
       - call: [g_api.graph_view, xch]
       - call: [g_lock.release]
 
@@ -58,7 +58,7 @@
     args: [[req, http_request_handle], [resp, http_response_handle]]
     body:
       - call: [g_lock.acquire]
-      - decl: [xch, ptr<museum.http.Exchange>, { call: [wrap, req, resp] }]
+      - decl: [xch, ptr<kontor.http.Exchange>, { call: [wrap, req, resp] }]
       - call: [g_api.impact, xch]
       - call: [g_lock.release]
 
@@ -67,7 +67,7 @@
     args: [[req, http_request_handle], [resp, http_response_handle]]
     body:
       - call: [g_lock.acquire]
-      - decl: [xch, ptr<museum.http.Exchange>, { call: [wrap, req, resp] }]
+      - decl: [xch, ptr<kontor.http.Exchange>, { call: [wrap, req, resp] }]
       - call: [g_api.manifest_put, xch]
       - call: [g_lock.release]
 
@@ -76,7 +76,7 @@
     args: [[req, http_request_handle], [resp, http_response_handle]]
     body:
       - call: [g_lock.acquire]
-      - decl: [xch, ptr<museum.http.Exchange>, { call: [wrap, req, resp] }]
+      - decl: [xch, ptr<kontor.http.Exchange>, { call: [wrap, req, resp] }]
       - call: [g_api.manifest_get, xch]
       - call: [g_lock.release]
 
@@ -85,7 +85,7 @@
     args: [[req, http_request_handle], [resp, http_response_handle]]
     body:
       - call: [g_lock.acquire]
-      - decl: [xch, ptr<museum.http.Exchange>, { call: [wrap, req, resp] }]
+      - decl: [xch, ptr<kontor.http.Exchange>, { call: [wrap, req, resp] }]
       - call: [g_api.package_put, xch]
       - call: [g_lock.release]
 
@@ -94,7 +94,7 @@
     args: [[req, http_request_handle], [resp, http_response_handle]]
     body:
       - call: [g_lock.acquire]
-      - decl: [xch, ptr<museum.http.Exchange>, { call: [wrap, req, resp] }]
+      - decl: [xch, ptr<kontor.http.Exchange>, { call: [wrap, req, resp] }]
       - call: [g_api.package_get, xch]
       - call: [g_lock.release]
 
@@ -103,7 +103,7 @@
     args: [[req, http_request_handle], [resp, http_response_handle]]
     body:
       - call: [g_lock.acquire]
-      - decl: [xch, ptr<museum.http.Exchange>, { call: [wrap, req, resp] }]
+      - decl: [xch, ptr<kontor.http.Exchange>, { call: [wrap, req, resp] }]
       - call: [g_api.generic_put, xch]
       - call: [g_lock.release]
 
@@ -112,7 +112,7 @@
     args: [[req, http_request_handle], [resp, http_response_handle]]
     body:
       - call: [g_lock.acquire]
-      - decl: [xch, ptr<museum.http.Exchange>, { call: [wrap, req, resp] }]
+      - decl: [xch, ptr<kontor.http.Exchange>, { call: [wrap, req, resp] }]
       - call: [g_api.generic_get, xch]
       - call: [g_lock.release]
 
@@ -121,7 +121,7 @@
     args: [[req, http_request_handle], [resp, http_response_handle]]
     body:
       - call: [g_lock.acquire]
-      - decl: [xch, ptr<museum.http.Exchange>, { call: [wrap, req, resp] }]
+      - decl: [xch, ptr<kontor.http.Exchange>, { call: [wrap, req, resp] }]
       - call: [g_api.sso_login, xch]
       - call: [g_lock.release]
 
@@ -130,7 +130,7 @@
     args: [[req, http_request_handle], [resp, http_response_handle]]
     body:
       - call: [g_lock.acquire]
-      - decl: [xch, ptr<museum.http.Exchange>, { call: [wrap, req, resp] }]
+      - decl: [xch, ptr<kontor.http.Exchange>, { call: [wrap, req, resp] }]
       - call: [g_api.sso_acs, xch]
       - call: [g_lock.release]
 
@@ -139,7 +139,7 @@
     args: [[req, http_request_handle], [resp, http_response_handle]]
     body:
       - call: [g_lock.acquire]
-      - decl: [xch, ptr<museum.http.Exchange>, { call: [wrap, req, resp] }]
+      - decl: [xch, ptr<kontor.http.Exchange>, { call: [wrap, req, resp] }]
       - call: [g_api.whoami, xch]
       - call: [g_lock.release]
 
@@ -148,7 +148,7 @@
     args: [[req, http_request_handle], [resp, http_response_handle]]
     body:
       - call: [g_lock.acquire]
-      - decl: [xch, ptr<museum.http.Exchange>, { call: [wrap, req, resp] }]
+      - decl: [xch, ptr<kontor.http.Exchange>, { call: [wrap, req, resp] }]
       - call: [g_api.token_create, xch]
       - call: [g_lock.release]
 
@@ -157,7 +157,7 @@
     args: [[req, http_request_handle], [resp, http_response_handle]]
     body:
       - call: [g_lock.acquire]
-      - decl: [xch, ptr<museum.http.Exchange>, { call: [wrap, req, resp] }]
+      - decl: [xch, ptr<kontor.http.Exchange>, { call: [wrap, req, resp] }]
       - call: [g_api.token_list, xch]
       - call: [g_lock.release]
 
@@ -166,7 +166,7 @@
     args: [[req, http_request_handle], [resp, http_response_handle]]
     body:
       - call: [g_lock.acquire]
-      - decl: [xch, ptr<museum.http.Exchange>, { call: [wrap, req, resp] }]
+      - decl: [xch, ptr<kontor.http.Exchange>, { call: [wrap, req, resp] }]
       - call: [g_api.token_revoke, xch]
       - call: [g_lock.release]
 
@@ -175,7 +175,7 @@
     args: [[req, http_request_handle], [resp, http_response_handle]]
     body:
       - call: [g_lock.acquire]
-      - decl: [xch, ptr<museum.http.Exchange>, { call: [wrap, req, resp] }]
+      - decl: [xch, ptr<kontor.http.Exchange>, { call: [wrap, req, resp] }]
       - call: [g_api.user_put, xch]
       - call: [g_lock.release]
 
@@ -184,7 +184,7 @@
     args: [[req, http_request_handle], [resp, http_response_handle]]
     body:
       - call: [g_lock.acquire]
-      - decl: [xch, ptr<museum.http.Exchange>, { call: [wrap, req, resp] }]
+      - decl: [xch, ptr<kontor.http.Exchange>, { call: [wrap, req, resp] }]
       - call: [g_api.user_list, xch]
       - call: [g_lock.release]
 
@@ -193,7 +193,7 @@
     args: [[req, http_request_handle], [resp, http_response_handle]]
     body:
       - call: [g_lock.acquire]
-      - decl: [xch, ptr<museum.http.Exchange>, { call: [wrap, req, resp] }]
+      - decl: [xch, ptr<kontor.http.Exchange>, { call: [wrap, req, resp] }]
       - call: [g_api.user_delete, xch]
       - call: [g_lock.release]
 
@@ -202,7 +202,7 @@
     args: [[req, http_request_handle], [resp, http_response_handle]]
     body:
       - call: [g_lock.acquire]
-      - decl: [xch, ptr<museum.http.Exchange>, { call: [wrap, req, resp] }]
+      - decl: [xch, ptr<kontor.http.Exchange>, { call: [wrap, req, resp] }]
       - call: [g_api.hook_create, xch]
       - call: [g_lock.release]
 
@@ -211,7 +211,7 @@
     args: [[req, http_request_handle], [resp, http_response_handle]]
     body:
       - call: [g_lock.acquire]
-      - decl: [xch, ptr<museum.http.Exchange>, { call: [wrap, req, resp] }]
+      - decl: [xch, ptr<kontor.http.Exchange>, { call: [wrap, req, resp] }]
       - call: [g_api.hook_list, xch]
       - call: [g_lock.release]
 
@@ -220,7 +220,7 @@
     args: [[req, http_request_handle], [resp, http_response_handle]]
     body:
       - call: [g_lock.acquire]
-      - decl: [xch, ptr<museum.http.Exchange>, { call: [wrap, req, resp] }]
+      - decl: [xch, ptr<kontor.http.Exchange>, { call: [wrap, req, resp] }]
       - call: [g_api.hook_delete, xch]
       - call: [g_lock.release]
 
@@ -229,7 +229,7 @@
     args: [[req, http_request_handle], [resp, http_response_handle]]
     body:
       - call: [g_lock.acquire]
-      - decl: [xch, ptr<museum.http.Exchange>, { call: [wrap, req, resp] }]
+      - decl: [xch, ptr<kontor.http.Exchange>, { call: [wrap, req, resp] }]
       - call: [g_api.hook_test, xch]
       - call: [g_lock.release]
 
@@ -238,7 +238,7 @@
     args: [[req, http_request_handle], [resp, http_response_handle]]
     body:
       - call: [g_lock.acquire]
-      - decl: [xch, ptr<museum.http.Exchange>, { call: [wrap, req, resp] }]
+      - decl: [xch, ptr<kontor.http.Exchange>, { call: [wrap, req, resp] }]
       - call: [g_api.hook_deliveries, xch]
       - call: [g_lock.release]
 
@@ -247,7 +247,7 @@
     args: [[req, http_request_handle], [resp, http_response_handle]]
     body:
       - call: [g_lock.acquire]
-      - decl: [xch, ptr<museum.http.Exchange>, { call: [wrap, req, resp] }]
+      - decl: [xch, ptr<kontor.http.Exchange>, { call: [wrap, req, resp] }]
       - call: [g_api.hook_redeliver, xch]
       - call: [g_lock.release]
 
@@ -256,7 +256,7 @@
     args: [[req, http_request_handle], [resp, http_response_handle]]
     body:
       - call: [g_lock.acquire]
-      - decl: [xch, ptr<museum.http.Exchange>, { call: [wrap, req, resp] }]
+      - decl: [xch, ptr<kontor.http.Exchange>, { call: [wrap, req, resp] }]
       - call: [g_api.layer_runs, xch]
       - call: [g_lock.release]
 
@@ -265,7 +265,7 @@
     args: [[req, http_request_handle], [resp, http_response_handle]]
     body:
       - call: [g_lock.acquire]
-      - decl: [xch, ptr<museum.http.Exchange>, { call: [wrap, req, resp] }]
+      - decl: [xch, ptr<kontor.http.Exchange>, { call: [wrap, req, resp] }]
       - call: [g_api.layer_run, xch]
       - call: [g_lock.release]
 
@@ -274,7 +274,7 @@
     args: [[req, http_request_handle], [resp, http_response_handle]]
     body:
       - call: [g_lock.acquire]
-      - decl: [xch, ptr<museum.http.Exchange>, { call: [wrap, req, resp] }]
+      - decl: [xch, ptr<kontor.http.Exchange>, { call: [wrap, req, resp] }]
       - call: [g_api.v2_read, xch]
       - call: [g_lock.release]
 
@@ -283,7 +283,7 @@
     args: [[req, http_request_handle], [resp, http_response_handle]]
     body:
       - call: [g_lock.acquire]
-      - decl: [xch, ptr<museum.http.Exchange>, { call: [wrap, req, resp] }]
+      - decl: [xch, ptr<kontor.http.Exchange>, { call: [wrap, req, resp] }]
       - call: [g_api.v2_post, xch]
       - call: [g_lock.release]
 
@@ -292,7 +292,7 @@
     args: [[req, http_request_handle], [resp, http_response_handle]]
     body:
       - call: [g_lock.acquire]
-      - decl: [xch, ptr<museum.http.Exchange>, { call: [wrap, req, resp] }]
+      - decl: [xch, ptr<kontor.http.Exchange>, { call: [wrap, req, resp] }]
       - call: [g_api.v2_patch, xch]
       - call: [g_lock.release]
 
@@ -301,7 +301,7 @@
     args: [[req, http_request_handle], [resp, http_response_handle]]
     body:
       - call: [g_lock.acquire]
-      - decl: [xch, ptr<museum.http.Exchange>, { call: [wrap, req, resp] }]
+      - decl: [xch, ptr<kontor.http.Exchange>, { call: [wrap, req, resp] }]
       - call: [g_api.v2_put, xch]
       - call: [g_lock.release]
 
@@ -310,7 +310,7 @@
     args: [[req, http_request_handle], [resp, http_response_handle]]
     body:
       - call: [g_lock.acquire]
-      - decl: [xch, ptr<museum.http.Exchange>, { call: [wrap, req, resp] }]
+      - decl: [xch, ptr<kontor.http.Exchange>, { call: [wrap, req, resp] }]
       - call: [g_api.v2_delete, xch]
       - call: [g_lock.release]
 
@@ -319,11 +319,11 @@
     args: [[req, http_request_handle], [resp, http_response_handle]]
     body:
       - call: [g_lock.acquire]
-      - decl: [xch, ptr<museum.http.Exchange>, { call: [wrap, req, resp] }]
+      - decl: [xch, ptr<kontor.http.Exchange>, { call: [wrap, req, resp] }]
       - call: [xch.error, 404, "no such endpoint"]
       - call: [g_lock.release]
 
-# Admin bootstrap secret: --admin-token-file <path> or MUSEUM_ADMIN_TOKEN.
+# Admin bootstrap secret: --admin-token-file <path> or KONTOR_ADMIN_TOKEN.
 # Never logged.  Returns "" when none is configured.
 - def:
     name: bootstrap_secret
@@ -349,9 +349,9 @@
             - set: [idx, { +: [idx, 1] }]
       - decl: [envm, map<string:string>, sys.env]
       - if:
-          condition: { call: [envm.contains, "MUSEUM_ADMIN_TOKEN"] }
+          condition: { call: [envm.contains, "KONTOR_ADMIN_TOKEN"] }
           then:
-            - decl: [from_env, string, { call: [envm.get, "MUSEUM_ADMIN_TOKEN"] }]
+            - decl: [from_env, string, { call: [envm.get, "KONTOR_ADMIN_TOKEN"] }]
             - return: [{ call: [from_env.trim] }]
       - return: [""]
 
@@ -401,12 +401,12 @@
       - call: [io.mkdir_all, "${data_dir}/tmp/spool"]
       - call: [g_lock.init]
 
-      # public_url (for webhook payloads) from museum.yaml, default http://localhost:<port>
+      # public_url (for webhook payloads) from kontor.yaml, default http://localhost:<port>
       - decl: [public_url, string, "http://localhost:${port}"]
       - if:
-          condition: { call: [io.exists, "${data_dir}/museum.yaml"] }
+          condition: { call: [io.exists, "${data_dir}/kontor.yaml"] }
           then:
-            - decl: [cfg, ptr<yaml_doc>, { call: [yaml.parse_file, "${data_dir}/museum.yaml"] }]
+            - decl: [cfg, ptr<yaml_doc>, { call: [yaml.parse_file, "${data_dir}/kontor.yaml"] }]
             - decl: [configured, string, { call: [yaml.scalar, { call: [yaml.get, { call: [yaml.root, cfg] }, "public_url"] }] }]
             - call: [yaml.free, cfg]
             - if:
@@ -414,12 +414,12 @@
                 then:
                   - set: [public_url, configured]
 
-      - set: [g_api, { new: museum.api.RepositoryApi }]
+      - set: [g_api, { new: kontor.api.RepositoryApi }]
       - decl: [problem, string, { call: [g_api.setup, data_dir, public_url] }]
       - if:
           condition: { gt: [problem.len, 0] }
           then:
-            - call: [log.error, "museum.yaml: ${problem}"]
+            - call: [log.error, "kontor.yaml: ${problem}"]
             - return: [2]
       - decl: [secret, string, { call: [bootstrap_secret] }]
       - if:
@@ -434,7 +434,7 @@
             - call: [log.info, "admin bootstrap token installed (id bootstrap)"]
 
       - decl: [worker, thread_handle]
-      - set: [worker, { spawn: [museum.hooks.worker_loop, data_dir, public_url] }]
+      - set: [worker, { spawn: [kontor.hooks.worker_loop, data_dir, public_url] }]
       - call: [worker.detach]
 
       - decl: [srv, http_server_handle]
@@ -485,6 +485,6 @@
       - call: [srv.route, "PUT", "/v2/*", on_v2_put]
       - call: [srv.route, "DELETE", "/v2/*", on_v2_delete]
       - call: [srv.route, "*", "/*", on_not_found]
-      - call: [log.info, "museum listening on :${port}, data in ${data_dir}"]
+      - call: [log.info, "kontor listening on :${port}, data in ${data_dir}"]
       - call: [srv.start]
       - return: [0]

@@ -1,4 +1,4 @@
-# museum.identity — LDAP and SAML 2.0 as identity sources (contract
+# kontor.identity — LDAP and SAML 2.0 as identity sources (contract
 # doc/ecosystem.md §6).
 #
 # The mechanisms are aiml builtins (aiml spec/67: `ldap.*`, `saml.*`); this file
@@ -14,14 +14,14 @@
 #       user_dn: "uid={user},ou=people,dc=example,dc=org"   # or search-then-bind:
 #       search_base: "ou=people,dc=example,dc=org"
 #       search_filter: "(uid={user})"
-#       bind_dn: "cn=museum,ou=services,dc=example,dc=org"
-#       bind_password_file: /etc/museum/ldap.pw
+#       bind_dn: "cn=kontor,ou=services,dc=example,dc=org"
+#       bind_password_file: /etc/kontor/ldap.pw
 #       group_attr: memberOf
 #     saml:
 #       idp_sso_url: https://idp.example.org/sso
-#       idp_cert_file: /etc/museum/idp.pem
-#       sp_entity_id: https://museum.example.org/sp
-#       acs_url: https://museum.example.org/api/v1/sso/saml/acs
+#       idp_cert_file: /etc/kontor/idp.pem
+#       sp_entity_id: https://kontor.example.org/sp
+#       acs_url: https://kontor.example.org/api/v1/sso/saml/acs
 #       idp_entity_id: https://idp.example.org        # optional issuer check
 #       group_attr: groups
 #       session_hours: 12
@@ -30,7 +30,7 @@
 # empty password never reaches the directory; a SAML response counts only for
 # an AuthnRequest this process issued, once, within 10 minutes.
 
-- namespace: museum.identity
+- namespace: kontor.identity
 
 - model:
     name: Identity
@@ -152,9 +152,9 @@
       - def:
           name: ldap_check
           args: [[user, string], [password, string]]
-          return: museum.identity.Identity
+          return: kontor.identity.Identity
           body:
-            - decl: [out, museum.identity.Identity]
+            - decl: [out, kontor.identity.Identity]
             - if:
                 condition: { or: [{ eq: [<.ldap_url.len, 0] }, { or: [{ eq: [user.len, 0] }, { eq: [password.len, 0] }] }] }
                 then:
@@ -241,9 +241,9 @@
       - def:
           name: saml_finish
           args: [[response_b64, string]]
-          return: museum.identity.Identity
+          return: kontor.identity.Identity
           body:
-            - decl: [out, museum.identity.Identity]
+            - decl: [out, kontor.identity.Identity]
             - if:
                 condition: { eq: [<.saml_sso_url.len, 0] }
                 then:

@@ -1,4 +1,4 @@
-# museum.auth — identities, API tokens, roles (contract doc/ecosystem.md §6).
+# kontor.auth — identities, API tokens, roles (contract doc/ecosystem.md §6).
 #
 # Storage (below <data>/auth/, every file written atomically):
 #   users/<name>          {"name","password":"pbkdf2$<iter>$<salt>$<key>","roles":[…],"source":"local"}
@@ -14,13 +14,13 @@
 # Directory/IdP groups become roles through `auth.group_roles`; every LDAP or
 # SAML user also gets `auth.default_role` (default reader; "none" = groups only).
 
-- namespace: museum.auth
+- namespace: kontor.auth
 
 - import: "text.aiml"
 - import: "store.aiml"
 - import: "identity.aiml"
 
-# Identity sources (auth.identity_sources in museum.yaml): local (users and
+# Identity sources (auth.identity_sources in kontor.yaml): local (users and
 # tokens below), ldap and saml.  authenticate() asks local first, then LDAP.
 
 - model:
@@ -105,7 +105,7 @@
     args: [[csv, string]]
     return: string
     body:
-      - return: [{ call: [museum.text.json_list, { call: [museum.auth.csv_list, csv] }] }]
+      - return: [{ call: [kontor.text.json_list, { call: [kontor.auth.csv_list, csv] }] }]
 
 - class:
     name: AccessControl
@@ -117,7 +117,7 @@
       - [pbkdf2_iterations, i32, 100000, { access: public }]
       - [config_error, string, "", { access: public }]
       # LDAP / SAML (lib/identity.aiml); null when neither is configured.
-      - [idp, ptr<museum.identity.IdentitySources>, null, { access: public }]
+      - [idp, ptr<kontor.identity.IdentitySources>, null, { access: public }]
       - [use_ldap, i32, 0, { access: public }]
       - [use_saml, i32, 0, { access: public }]
       # directory/IdP group → role, and the role every external user gets
@@ -130,7 +130,7 @@
           body:
             - return: ["${<.data_dir}/auth"]
 
-      # Built-in roles; museum.yaml `roles:` adds to or overrides them.
+      # Built-in roles; kontor.yaml `roles:` adds to or overrides them.
       - def:
           name: default_roles
           body:
@@ -139,7 +139,7 @@
             - call: [<.roles.put, "maintainer", "read,write,delete"]
             - call: [<.roles.put, "admin", "*"]
 
-      # Reads <data>/museum.yaml if present:
+      # Reads <data>/kontor.yaml if present:
       #   auth: { anonymous: <role>|none, identity_sources: [local] }
       #   roles: { <name>: [<action>, …], … }
       - def:
@@ -168,8 +168,8 @@
                 condition: { gt: [anon.len, 0] }
                 then:
                   - set: [<.anonymous_role, anon]
-            - decl: [sources, string, { call: [museum.auth.seq_csv, { call: [yaml.get, auth_node, "identity_sources"] }] }]
-            - decl: [src_list, list<string>, { call: [museum.auth.csv_list, sources] }]
+            - decl: [sources, string, { call: [kontor.auth.seq_csv, { call: [yaml.get, auth_node, "identity_sources"] }] }]
+            - decl: [src_list, list<string>, { call: [kontor.auth.csv_list, sources] }]
             - decl: [sidx, i32, 0]
             - while:
                 condition: { lt: [sidx, src_list.len] }
@@ -187,7 +187,7 @@
             - if:
                 condition: { or: [{ eq: [<.use_ldap, 1] }, { eq: [<.use_saml, 1] }] }
                 then:
-                  - decl: [idp_new, ptr<museum.identity.IdentitySources>, { new: museum.identity.IdentitySources }]
+                  - decl: [idp_new, ptr<kontor.identity.IdentitySources>, { new: kontor.identity.IdentitySources }]
                   - decl: [idp_err, string, { call: [idp_new.load, auth_node, <.use_ldap, <.use_saml] }]
                   - if: { condition: { gt: [idp_err.len, 0] }, then: [{ set: [<.config_error, idp_err] }] }
                   - set: [<.idp, idp_new]
@@ -208,7 +208,7 @@
                 condition: { lt: [ridx, rcount] }
                 body:
                   - decl: [rname, string, { call: [yaml.key, roles_node, ridx] }]
-                  - decl: [actions, string, { call: [museum.auth.seq_csv, { call: [yaml.value, roles_node, ridx] }] }]
+                  - decl: [actions, string, { call: [kontor.auth.seq_csv, { call: [yaml.value, roles_node, ridx] }] }]
                   - call: [<.roles.put, rname, actions]
                   - set: [ridx, { +: [ridx, 1] }]
             - call: [yaml.free, doc]
@@ -224,7 +224,7 @@
           args: [[roles_csv, string], [action, string]]
           return: i32
           body:
-            - decl: [role_list, list<string>, { call: [museum.auth.csv_list, roles_csv] }]
+            - decl: [role_list, list<string>, { call: [kontor.auth.csv_list, roles_csv] }]
             - decl: [idx, i32, 0]
             - while:
                 condition: { lt: [idx, role_list.len] }
@@ -234,7 +234,7 @@
                       condition: { eq: [{ call: [<.roles.contains, role] }, 1] }
                       then:
                         - decl: [granted, string, { call: [<.roles.get, role] }]
-                        - decl: [acts, list<string>, { call: [museum.auth.csv_list, granted] }]
+                        - decl: [acts, list<string>, { call: [kontor.auth.csv_list, granted] }]
                         - if:
                             condition: { or: [{ eq: [{ call: [acts.contains, "*"] }, 1] }, { eq: [{ call: [acts.contains, action] }, 1] }] }
                             then:
@@ -248,7 +248,7 @@
           args: [[roles_csv, string]]
           return: i32
           body:
-            - decl: [role_list, list<string>, { call: [museum.auth.csv_list, roles_csv] }]
+            - decl: [role_list, list<string>, { call: [kontor.auth.csv_list, roles_csv] }]
             - if:
                 condition: { eq: [role_list.len, 0] }
                 then:
@@ -275,13 +275,13 @@
                 condition: { eq: [{ call: [<.allows, held, "admin"] }, 1] }
                 then:
                   - return: [1]
-            - decl: [want_list, list<string>, { call: [museum.auth.csv_list, wanted] }]
+            - decl: [want_list, list<string>, { call: [kontor.auth.csv_list, wanted] }]
             - decl: [widx, i32, 0]
             - while:
                 condition: { lt: [widx, want_list.len] }
                 body:
                   - decl: [granted, string, { call: [<.roles.get, { call: [want_list.get, widx] }] }]
-                  - decl: [acts, list<string>, { call: [museum.auth.csv_list, granted] }]
+                  - decl: [acts, list<string>, { call: [kontor.auth.csv_list, granted] }]
                   - decl: [aidx, i32, 0]
                   - while:
                       condition: { lt: [aidx, acts.len] }
@@ -297,9 +297,9 @@
 
       - def:
           name: anonymous
-          return: museum.auth.Principal
+          return: kontor.auth.Principal
           body:
-            - decl: [who, museum.auth.Principal]
+            - decl: [who, kontor.auth.Principal]
             - set: [who.kind, "anonymous"]
             - set: [who.name, "anonymous"]
             - if:
@@ -333,7 +333,7 @@
           return: string
           body:
             - if:
-                condition: { eq: [{ call: [museum.auth.valid_name, name] }, 0] }
+                condition: { eq: [{ call: [kontor.auth.valid_name, name] }, 0] }
                 then:
                   - return: ["invalid user name"]
             - if:
@@ -345,11 +345,11 @@
                 then:
                   - return: ["unknown or empty roles"]
             - decl: [stored, string, { call: [<.hash_password, password] }]
-            - decl: [name_json, string, { call: [museum.text.json_str, name] }]
-            - decl: [pw_json, string, { call: [museum.text.json_str, stored] }]
-            - decl: [roles_json, string, { call: [museum.auth.csv_json, roles_csv] }]
+            - decl: [name_json, string, { call: [kontor.text.json_str, name] }]
+            - decl: [pw_json, string, { call: [kontor.text.json_str, stored] }]
+            - decl: [roles_json, string, { call: [kontor.auth.csv_json, roles_csv] }]
             - decl: [dir, string, "${{ call: [<.auth_dir] }}/users"]
-            - call: [museum.store.write_text, <.data_dir, dir, name, "{\"name\":${name_json},\"password\":${pw_json},\"roles\":${roles_json},\"source\":\"local\"}"]
+            - call: [kontor.store.write_text, <.data_dir, dir, name, "{\"name\":${name_json},\"password\":${pw_json},\"roles\":${roles_json},\"source\":\"local\"}"]
             - return: [""]
 
       - def:
@@ -358,7 +358,7 @@
           return: i32
           body:
             - if:
-                condition: { eq: [{ call: [museum.auth.valid_name, name] }, 0] }
+                condition: { eq: [{ call: [kontor.auth.valid_name, name] }, 0] }
                 then:
                   - return: [0]
             - decl: [upath, string, { call: [<.user_path, name] }]
@@ -373,11 +373,11 @@
       - def:
           name: check_password
           args: [[name, string], [password, string]]
-          return: museum.auth.Principal
+          return: kontor.auth.Principal
           body:
-            - decl: [who, museum.auth.Principal]
+            - decl: [who, kontor.auth.Principal]
             - if:
-                condition: { or: [{ eq: [{ call: [museum.auth.valid_name, name] }, 0] }, { eq: [password.len, 0] }] }
+                condition: { or: [{ eq: [{ call: [kontor.auth.valid_name, name] }, 0] }, { eq: [password.len, 0] }] }
                 then:
                   - return: [who]
             - decl: [upath, string, { call: [<.user_path, name] }]
@@ -388,7 +388,7 @@
             - decl: [doc, ptr<yaml_doc>, { call: [yaml.parse_file, upath] }]
             - decl: [root, ptr<yaml_node>, { call: [yaml.root, doc] }]
             - decl: [stored, string, { call: [yaml.scalar, { call: [yaml.get, root, "password"] }] }]
-            - decl: [roles_csv, string, { call: [museum.auth.seq_csv, { call: [yaml.get, root, "roles"] }] }]
+            - decl: [roles_csv, string, { call: [kontor.auth.seq_csv, { call: [yaml.get, root, "roles"] }] }]
             - call: [yaml.free, doc]
             - decl: [parts, list<string>, { call: [stored.split, "$"] }]
             - if:
@@ -412,7 +412,7 @@
           name: users_json
           return: string
           body:
-            - decl: [names, list<string>, { call: [museum.store.list_files, "${{ call: [<.auth_dir] }}/users"] }]
+            - decl: [names, list<string>, { call: [kontor.store.list_files, "${{ call: [<.auth_dir] }}/users"] }]
             - decl: [out, string, ""]
             - decl: [idx, i32, 0]
             - while:
@@ -421,16 +421,16 @@
                   - decl: [name, string, { call: [names.get, idx] }]
                   - decl: [doc, ptr<yaml_doc>, { call: [yaml.parse_file, { call: [<.user_path, name] }] }]
                   - decl: [root, ptr<yaml_node>, { call: [yaml.root, doc] }]
-                  - decl: [roles_csv, string, { call: [museum.auth.seq_csv, { call: [yaml.get, root, "roles"] }] }]
+                  - decl: [roles_csv, string, { call: [kontor.auth.seq_csv, { call: [yaml.get, root, "roles"] }] }]
                   - decl: [source, string, { call: [yaml.scalar, { call: [yaml.get, root, "source"] }] }]
                   - call: [yaml.free, doc]
-                  - decl: [name_json, string, { call: [museum.text.json_str, name] }]
-                  - decl: [src_json, string, { call: [museum.text.json_str, source] }]
+                  - decl: [name_json, string, { call: [kontor.text.json_str, name] }]
+                  - decl: [src_json, string, { call: [kontor.text.json_str, source] }]
                   - if:
                       condition: { gt: [out.len, 0] }
                       then:
                         - set: [out, "${out},"]
-                  - set: [out, "${out}{\"name\":${name_json},\"roles\":${{ call: [museum.auth.csv_json, roles_csv] }},\"source\":${src_json}}"]
+                  - set: [out, "${out}{\"name\":${name_json},\"roles\":${{ call: [kontor.auth.csv_json, roles_csv] }},\"source\":${src_json}}"]
                   - set: [idx, { +: [idx, 1] }]
             - return: ["[${out}]"]
 
@@ -449,11 +449,11 @@
           body:
             - decl: [digest, string, { call: [hash.sha256, secret] }]
             - decl: [now_ms, i64, { call: [time.now] }]
-            - decl: [id_json, string, { call: [museum.text.json_str, token_id] }]
-            - decl: [owner_json, string, { call: [museum.text.json_str, owner] }]
-            - decl: [label_json, string, { call: [museum.text.json_str, label] }]
-            - decl: [roles_json, string, { call: [museum.auth.csv_json, roles_csv] }]
-            - call: [museum.store.write_text, <.data_dir, { call: [<.token_dir] }, digest, "{\"id\":${id_json},\"owner\":${owner_json},\"label\":${label_json},\"roles\":${roles_json},\"created_ms\":${now_ms}}"]
+            - decl: [id_json, string, { call: [kontor.text.json_str, token_id] }]
+            - decl: [owner_json, string, { call: [kontor.text.json_str, owner] }]
+            - decl: [label_json, string, { call: [kontor.text.json_str, label] }]
+            - decl: [roles_json, string, { call: [kontor.auth.csv_json, roles_csv] }]
+            - call: [kontor.store.write_text, <.data_dir, { call: [<.token_dir] }, digest, "{\"id\":${id_json},\"owner\":${owner_json},\"label\":${label_json},\"roles\":${roles_json},\"created_ms\":${now_ms}}"]
             - return: [token_id]
 
       # New random token: returns the secret (shown once).  The caller checks
@@ -473,9 +473,9 @@
       - def:
           name: check_token
           args: [[secret, string], [owner, string]]
-          return: museum.auth.Principal
+          return: kontor.auth.Principal
           body:
-            - decl: [who, museum.auth.Principal]
+            - decl: [who, kontor.auth.Principal]
             - if:
                 condition: { lt: [secret.len, 16] }
                 then:
@@ -489,7 +489,7 @@
             - decl: [doc, ptr<yaml_doc>, { call: [yaml.parse_file, tpath] }]
             - decl: [root, ptr<yaml_node>, { call: [yaml.root, doc] }]
             - decl: [tok_owner, string, { call: [yaml.scalar, { call: [yaml.get, root, "owner"] }] }]
-            - decl: [roles_csv, string, { call: [museum.auth.seq_csv, { call: [yaml.get, root, "roles"] }] }]
+            - decl: [roles_csv, string, { call: [kontor.auth.seq_csv, { call: [yaml.get, root, "roles"] }] }]
             - decl: [expires, string, { call: [yaml.scalar, { call: [yaml.get, root, "expires_ms"] }] }]
             - call: [yaml.free, doc]
             - if:
@@ -517,7 +517,7 @@
           args: [[token_id, string], [owner, string]]
           return: i32
           body:
-            - decl: [files, list<string>, { call: [museum.store.list_files, { call: [<.token_dir] }] }]
+            - decl: [files, list<string>, { call: [kontor.store.list_files, { call: [<.token_dir] }] }]
             - decl: [idx, i32, 0]
             - while:
                 condition: { lt: [idx, files.len] }
@@ -542,7 +542,7 @@
           args: [[owner, string]]
           return: string
           body:
-            - decl: [files, list<string>, { call: [museum.store.list_files, { call: [<.token_dir] }] }]
+            - decl: [files, list<string>, { call: [kontor.store.list_files, { call: [<.token_dir] }] }]
             - decl: [out, string, ""]
             - decl: [idx, i32, 0]
             - while:
@@ -554,7 +554,7 @@
                   - decl: [tok_owner, string, { call: [yaml.scalar, { call: [yaml.get, root, "owner"] }] }]
                   - decl: [label, string, { call: [yaml.scalar, { call: [yaml.get, root, "label"] }] }]
                   - decl: [created, string, { call: [yaml.scalar, { call: [yaml.get, root, "created_ms"] }] }]
-                  - decl: [roles_csv, string, { call: [museum.auth.seq_csv, { call: [yaml.get, root, "roles"] }] }]
+                  - decl: [roles_csv, string, { call: [kontor.auth.seq_csv, { call: [yaml.get, root, "roles"] }] }]
                   - call: [yaml.free, doc]
                   - if:
                       condition: { or: [{ eq: [owner.len, 0] }, { eq: [owner, tok_owner] }] }
@@ -563,7 +563,7 @@
                             condition: { gt: [out.len, 0] }
                             then:
                               - set: [out, "${out},"]
-                        - set: [out, "${out}{\"id\":${{ call: [museum.text.json_str, tid] }},\"owner\":${{ call: [museum.text.json_str, tok_owner] }},\"label\":${{ call: [museum.text.json_str, label] }},\"roles\":${{ call: [museum.auth.csv_json, roles_csv] }},\"created_ms\":${created}}"]
+                        - set: [out, "${out}{\"id\":${{ call: [kontor.text.json_str, tid] }},\"owner\":${{ call: [kontor.text.json_str, tok_owner] }},\"label\":${{ call: [kontor.text.json_str, label] }},\"roles\":${{ call: [kontor.auth.csv_json, roles_csv] }},\"created_ms\":${created}}"]
                   - set: [idx, { +: [idx, 1] }]
             - return: ["[${out}]"]
 
@@ -590,7 +590,7 @@
                 condition: { and: [{ neq: [<.default_role, "none"] }, { eq: [{ call: [<.roles.contains, <.default_role] }, 1] }] }
                 then:
                   - set: [out, <.default_role]
-            - decl: [glist, list<string>, { call: [museum.auth.csv_list, groups_csv] }]
+            - decl: [glist, list<string>, { call: [kontor.auth.csv_list, groups_csv] }]
             - decl: [idx, i32, 0]
             - while:
                 condition: { lt: [idx, glist.len] }
@@ -600,7 +600,7 @@
                       condition: { eq: [{ call: [<.group_roles.contains, grp] }, 1] }
                       then:
                         - decl: [mapped, string, { call: [<.group_roles.get, grp] }]
-                        - decl: [have, list<string>, { call: [museum.auth.csv_list, out] }]
+                        - decl: [have, list<string>, { call: [kontor.auth.csv_list, out] }]
                         - if:
                             condition: { eq: [{ call: [have.contains, mapped] }, 0] }
                             then:
@@ -611,10 +611,10 @@
 
       - def:
           name: external_principal
-          args: [[ident, museum.identity.Identity]]
-          return: museum.auth.Principal
+          args: [[ident, kontor.identity.Identity]]
+          return: kontor.auth.Principal
           body:
-            - decl: [who, museum.auth.Principal]
+            - decl: [who, kontor.auth.Principal]
             - if:
                 condition: { eq: [ident.valid, 0] }
                 then:
@@ -638,8 +638,8 @@
             - decl: [now_ms, i64, { call: [time.now] }]
             - decl: [life_ms, i64, { '*': [hours, 3600000] }]
             - decl: [until_ms, i64, { +: [now_ms, life_ms] }]
-            - decl: [body, string, "{\"id\":${{ call: [museum.text.json_str, token_id] }},\"owner\":${{ call: [museum.text.json_str, owner] }},\"label\":\"saml session\",\"roles\":${{ call: [museum.auth.csv_json, roles_csv] }},\"created_ms\":${now_ms},\"expires_ms\":${until_ms}}"]
-            - call: [museum.store.write_text, <.data_dir, { call: [<.token_dir] }, digest, body]
+            - decl: [body, string, "{\"id\":${{ call: [kontor.text.json_str, token_id] }},\"owner\":${{ call: [kontor.text.json_str, owner] }},\"label\":\"saml session\",\"roles\":${{ call: [kontor.auth.csv_json, roles_csv] }},\"created_ms\":${now_ms},\"expires_ms\":${until_ms}}"]
+            - call: [kontor.store.write_text, <.data_dir, { call: [<.token_dir] }, digest, body]
             - return: ["${token_id}:${secret}"]
 
       # ── request authentication ────────────────────────────────────────────
@@ -649,13 +649,13 @@
       - def:
           name: authenticate
           args: [[authorization, string]]
-          return: museum.auth.Principal
+          return: kontor.auth.Principal
           body:
             - if:
                 condition: { eq: [authorization.len, 0] }
                 then:
                   - return: [{ call: [<.anonymous] }]
-            - decl: [who, museum.auth.Principal]
+            - decl: [who, kontor.auth.Principal]
             - decl: [space, i32, { call: [authorization.index_of, " "] }]
             - if:
                 condition: { le: [space, 0] }
@@ -691,16 +691,16 @@
             - decl: [user, string, { call: [pair.substr, 0, colon] }]
             - decl: [secret, string, { call: [pair.substr, { +: [colon, 1] }] }]
             # A token as password (docker login): `user` must own it.
-            - decl: [by_token, museum.auth.Principal, { call: [<.check_token, secret, user] }]
+            - decl: [by_token, kontor.auth.Principal, { call: [<.check_token, secret, user] }]
             - if:
                 condition: { eq: [by_token.valid, 1] }
                 then:
                   - return: [by_token]
-            - decl: [local_who, museum.auth.Principal, { call: [<.check_password, user, secret] }]
+            - decl: [local_who, kontor.auth.Principal, { call: [<.check_password, user, secret] }]
             - if:
                 condition: { or: [{ eq: [local_who.valid, 1] }, { eq: [<.use_ldap, 0] }] }
                 then:
                   - return: [local_who]
             # Local first (a break-glass admin works without the directory), then LDAP.
-            - decl: [ident, museum.identity.Identity, { call: [<.idp.ldap_check, user, secret] }]
+            - decl: [ident, kontor.identity.Identity, { call: [<.idp.ldap_check, user, secret] }]
             - return: [{ call: [<.external_principal, ident] }]
