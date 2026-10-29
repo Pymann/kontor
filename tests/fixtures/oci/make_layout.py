@@ -33,7 +33,7 @@ def canon(obj):
     return json.dumps(obj, separators=(",", ":"), sort_keys=True).encode()
 
 def image(root):
-    layer = tar_gz({"hello.txt": "hello from museum\n", "etc/os-release": "ID=museum-test\n"})
+    layer = tar_gz({"hello.txt": "hello from kontor\n", "etc/os-release": "ID=kontor-test\n"})
     layer_desc = put(root, layer)
     diff_id = "sha256:" + hashlib.sha256(gzip.decompress(layer)).hexdigest()
     config = canon({"architecture": "amd64", "os": "linux",

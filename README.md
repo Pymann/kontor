@@ -1,10 +1,13 @@
-# museum
+# kontor
 
 An artifact repository written in [aiml](https://github.com/Pymann/aiml) that
 knows how your projects depend on each other. Upload a new build of a library
-and museum answers with the rebuild plan for everything downstream — in
+and kontor answers with the rebuild plan for everything downstream — in
 parallel waves, with pinned consumers flagged and byte-identical rebuilds
 recognized as no-ops.
+
+The name: a *Kontor* was a trading post of the Hanseatic League — where goods
+were received, booked, stored and passed on.  (Formerly named *museum*.)
 
 Status: prototype. Two repository types — **generic** (any file) and
 **exodus** (projects built with [Exodus](https://github.com/Pymann/exodus)).
@@ -12,7 +15,7 @@ Status: prototype. Two repository types — **generic** (any file) and
 ## Why
 
 Classic repositories store artifacts but have only a vague idea of who uses
-them. museum reads the `exodus.json` manifest of every project version and
+them. kontor reads the `exodus.json` manifest of every project version and
 keeps a dependency graph over the newest versions:
 
 - **project edges** from `dependencies` (other Exodus projects)
@@ -24,17 +27,17 @@ From that graph it answers two questions:
 2. *System package Y moved to version Z — which projects pin another version?*
 
 Exodus itself only rebuilds within one project (see `doc/dependency_resolution_report.md`
-in the Exodus repo); museum is the cross-project layer.
+in the Exodus repo); kontor is the cross-project layer.
 
 ## Run
 
-museum targets aiml's **`mem-v3-compiler`** branch (memV3 ownership model,
+kontor targets aiml's **`mem-v3-compiler`** branch (memV3 ownership model,
 spec/61) plus the branches listed under [aiml requirements](#aiml-requirements).
 Since 2026-10-28 (34c3340) all of them are merged into `mem-v3-compiler`
-itself; museum (and cosmos) pass their tests on it.
+itself; kontor (and cosmos) pass their tests on it.
 
 ```bash
-aiml museum.aiml -- 8081 ./data      # port and data directory (defaults: 8081, ./data)
+aiml kontor.aiml -- 8081 ./data      # port and data directory (defaults: 8081, ./data)
 ```
 
 ## API
@@ -82,7 +85,7 @@ exists under `/api/v1/…`; `/generic/…` and `/exodus/…` have `/api/v1/` ali
   revocable; scoped to roles. Use as `Authorization: Bearer <token>` or as the
   password of HTTP Basic (`user:token`, e.g. `docker login`/`skopeo --creds`).
   Basic `user:password` works too.
-- **Bootstrap**: `--admin-token-file <path>` or `MUSEUM_ADMIN_TOKEN` (≥32
+- **Bootstrap**: `--admin-token-file <path>` or `KONTOR_ADMIN_TOKEN` (≥32
   characters) installs an admin token with id `bootstrap` and owner `admin`.
   The secret is never logged.
 - **LDAP** (`identity_sources: [local, ldap]`): HTTP Basic `user:password`
@@ -93,7 +96,7 @@ exists under `/api/v1/…`; `/generic/…` and `/exodus/…` have `/api/v1/` ali
   `ldap.escape_filter`; an empty password never reaches the directory.
 - **SAML 2.0** (`identity_sources: [..., saml]`): `GET /api/v1/sso/saml/login?relay=/path`
   redirects to the IdP; `POST /api/v1/sso/saml/acs` verifies the signed
-  response (only for a request museum issued, once, ≤10 min; optional issuer
+  response (only for a request kontor issued, once, ≤10 min; optional issuer
   check) and mints a **session token** — an API token with `expires_ms`
   (`session_hours`, default 12).  A local `RelayState` gets a 302 with
   `#token=<id>:<secret>`, anything else gets JSON.
@@ -103,10 +106,10 @@ exists under `/api/v1/…`; `/generic/…` and `/exodus/…` have `/api/v1/` ali
 - Needs an aiml with the identity builtins (aiml spec/67, branch
   `feature/identity-builtins-memv3`).
 
-`data/museum.yaml` (optional):
+`data/kontor.yaml` (optional):
 
 ```yaml
-public_url: https://museum.example.com   # used in webhook payloads ("museum")
+public_url: https://kontor.example.com   # used in webhook payloads ("kontor")
 auth:
   anonymous: reader                      # role for anonymous requests, or "none"
   identity_sources: [local]              # or [local, ldap, saml]
@@ -123,7 +126,7 @@ auth:
 
 OCI Distribution Spec v1.1 under `/v2/`, tested with skopeo
 (`tests/ecosystem.sh`): `GET /v2/` (answers `401` with
-`WWW-Authenticate: Basic realm="museum"` without credentials), blob
+`WWW-Authenticate: Basic realm="kontor"` without credentials), blob
 `HEAD`/`GET` (`Docker-Content-Digest`, `Content-Length`, `Range`), uploads
 (monolithic `POST ?digest=`, sessions with `PATCH` + `Content-Range` and
 chunked transfer encoding, `PUT ?digest=` verifies the sha256, cross-repo
@@ -140,12 +143,12 @@ Limits: 10 GiB per request body, 4 MiB per manifest, 120 s idle timeout.
 ### Webhooks
 
 Contract: `doc/ecosystem.md` §4. Each event is POSTed as
-`{"event","delivery","timestamp_ms","museum","data"}` with
-`X-Museum-Event`, `X-Museum-Delivery` and
-`X-Museum-Signature-256: sha256=<HMAC-SHA256(secret, body)>`. A worker thread
+`{"event","delivery","timestamp_ms","kontor","data"}` with
+`X-Kontor-Event`, `X-Kontor-Delivery` and
+`X-Kontor-Signature-256: sha256=<HMAC-SHA256(secret, body)>`. A worker thread
 delivers the persisted queue; non-2xx answers are retried after 1 s, 5 s,
 30 s, 2 min and 10 min, then marked `failed`. Delivery is at-least-once —
-receivers dedupe on `X-Museum-Delivery`.
+receivers dedupe on `X-Kontor-Delivery`.
 
 ### Example
 
@@ -189,7 +192,7 @@ their rebuilt dependencies will get are not known yet.
 
 ```
 data/
-  museum.yaml                            optional configuration
+  kontor.yaml                            optional configuration
   cas/<aa>/<sha256>                      blobs, deduplicated by content (also OCI blobs and manifests)
   generic/<path>/blob.sha256             pointer to the blob
   exodus/<name>/<version>/exodus.json    manifest
@@ -206,20 +209,20 @@ data/
 ```
 
 Everything is plain files written via temp file + rename, so a crash never
-leaves a half-written record; restarting museum resumes queued deliveries.
+leaves a half-written record; restarting kontor resumes queued deliveries.
 
 ## Layout
 
 | File | |
 |---|---|
-| `museum.aiml` | entry point: routes, thin handlers |
-| `lib/api.aiml` | `museum.api.RepositoryApi` — the endpoints |
-| `lib/graph.aiml` | `museum.graph.DependencyGraph` — graph snapshot, rebuild planning |
-| `lib/exchange.aiml` | `museum.http.Exchange` — request/response helpers, JSON errors |
-| `lib/auth.aiml` | `museum.auth.AccessControl` — roles, users, tokens, authentication |
-| `lib/identity.aiml` | `museum.identity.IdentitySources` — LDAP and SAML on the aiml identity builtins |
-| `lib/oci.aiml` | `museum.oci.Registry` — OCI Distribution v1.1 |
-| `lib/hooks.aiml` | `museum.hooks.WebhookHub` — subscriptions, queue, signed delivery |
+| `kontor.aiml` | entry point: routes, thin handlers |
+| `lib/api.aiml` | `kontor.api.RepositoryApi` — the endpoints |
+| `lib/graph.aiml` | `kontor.graph.DependencyGraph` — graph snapshot, rebuild planning |
+| `lib/exchange.aiml` | `kontor.http.Exchange` — request/response helpers, JSON errors |
+| `lib/auth.aiml` | `kontor.auth.AccessControl` — roles, users, tokens, authentication |
+| `lib/identity.aiml` | `kontor.identity.IdentitySources` — LDAP and SAML on the aiml identity builtins |
+| `lib/oci.aiml` | `kontor.oci.Registry` — OCI Distribution v1.1 |
+| `lib/hooks.aiml` | `kontor.hooks.WebhookHub` — subscriptions, queue, signed delivery |
 | `lib/store.aiml` | content-addressed storage, atomic small files |
 | `lib/text.aiml` | JSON output, version ordering, path checks |
 
@@ -240,9 +243,9 @@ signature-verifying receivers (one fails twice, then accepts).
 
 ## aiml requirements
 
-Building museum surfaced gaps in aiml; each is fixed on its own branch off
-`mem-v3-compiler` with tests (the first nine are already merged into
-`mem-v3-compiler`):
+Building kontor surfaced gaps in aiml; each was fixed on its own branch off
+`mem-v3-compiler` with tests, and all of them are merged into
+`mem-v3-compiler` (aiml's default branch):
 
 | Branch | Fix |
 |---|---|
@@ -261,7 +264,7 @@ Building museum surfaced gaps in aiml; each is fixed on its own branch off
 
 ### Ownership (memV3)
 
-museum follows spec/61: the route handler owns the `Exchange` (`ptr<…>`) and
+kontor follows spec/61: the route handler owns the `Exchange` (`ptr<…>`) and
 lends it to the API (`ref<…>` parameters); the graph snapshot is read through a
 `ref`, and only `reload_graph` moves a new `ptr` into `RepositoryApi.graph`.
 Passing a `ptr` to a method moves it — the callee frees it at its end.

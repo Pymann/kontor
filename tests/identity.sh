@@ -74,7 +74,7 @@ for _ in $(seq 50); do [ -f "$WORK/slapd.pid" ] && break; sleep 0.1; done
 openssl req -x509 -newkey rsa:2048 -nodes -days 2 -subj "/CN=idp" -keyout "$WORK/idp_key.pem" -out "$WORK/idp_cert.pem" 2>/dev/null
 openssl req -x509 -newkey rsa:2048 -nodes -days 2 -subj "/CN=evil" -keyout "$WORK/evil_key.pem" -out "$WORK/evil_cert.pem" 2>/dev/null
 ACS="$BASE/api/v1/sso/saml/acs"
-cat > "$DATA/museum.yaml" <<YAML
+cat > "$DATA/kontor.yaml" <<YAML
 auth:
   anonymous: none
   identity_sources: [local, ldap, saml]
@@ -88,13 +88,13 @@ auth:
   saml:
     idp_sso_url: "https://idp.example/sso"
     idp_cert_file: "$WORK/idp_cert.pem"
-    sp_entity_id: "https://museum.example/sp"
+    sp_entity_id: "https://kontor.example/sp"
     acs_url: "$ACS"
     idp_entity_id: "https://idp.example"
     group_attr: groups
     session_hours: 1
 YAML
-"$AIML_BIN" museum.aiml -- "$PORT" "$DATA" > "$WORK/server.log" 2>&1 & PIDS="$PIDS $!"
+"$AIML_BIN" kontor.aiml -- "$PORT" "$DATA" > "$WORK/server.log" 2>&1 & PIDS="$PIDS $!"
 for _ in $(seq 100); do curl -s -o /dev/null "$BASE/api/health" && break; sleep 0.2; done
 
 code() { curl -s -o "$WORK/body" -w '%{http_code}' "$@"; }
@@ -131,7 +131,7 @@ print('<samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" xmlns:
       f'<saml:Subject><saml:NameID>carol@example.org</saml:NameID><saml:SubjectConfirmation Method="urn:oasis:names:tc:SAML:2.0:cm:bearer">'
       f'<saml:SubjectConfirmationData InResponseTo="{rid}" NotOnOrAfter="2099-01-01T00:00:00Z" Recipient="{acs}"/></saml:SubjectConfirmation></saml:Subject>'
       '<saml:Conditions NotBefore="2020-01-01T00:00:00Z" NotOnOrAfter="2099-01-01T00:00:00Z"><saml:AudienceRestriction>'
-      '<saml:Audience>https://museum.example/sp</saml:Audience></saml:AudienceRestriction></saml:Conditions>'
+      '<saml:Audience>https://kontor.example/sp</saml:Audience></saml:AudienceRestriction></saml:Conditions>'
       '<saml:AuthnStatement AuthnInstant="2026-10-27T20:00:00Z" SessionIndex="_s1"><saml:AuthnContext><saml:AuthnContextClassRef>'
       'urn:oasis:names:tc:SAML:2.0:ac:classes:Password</saml:AuthnContextClassRef></saml:AuthnContext></saml:AuthnStatement>'
       '<saml:AttributeStatement><saml:Attribute Name="groups"><saml:AttributeValue>devs</saml:AttributeValue></saml:Attribute>'

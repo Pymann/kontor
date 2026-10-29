@@ -1,5 +1,5 @@
 #!/bin/bash
-# End-to-end test: starts museum on a scratch data dir and drives it with curl.
+# End-to-end test: starts kontor on a scratch data dir and drives it with curl.
 #   AIML_BIN=/path/to/aiml tests/e2e.sh
 set -u
 cd "$(dirname "$0")/.."
@@ -22,7 +22,7 @@ ADMIN_TOKEN=$(head -c 32 /dev/urandom | sha256sum | cut -d' ' -f1)
 status() { curl -s -o "${OUT:-$WORK/body}" -w '%{http_code}' -H "Authorization: Bearer $ADMIN_TOKEN" "$@"; }
 anon() { curl -s -o "${OUT:-$WORK/body}" -w '%{http_code}' "$@"; }
 
-MUSEUM_ADMIN_TOKEN="$ADMIN_TOKEN" "$AIML_BIN" museum.aiml -- "$PORT" "$DATA" > "$WORK/server.log" 2>&1 &
+KONTOR_ADMIN_TOKEN="$ADMIN_TOKEN" "$AIML_BIN" kontor.aiml -- "$PORT" "$DATA" > "$WORK/server.log" 2>&1 &
 SRV=$!
 for _ in $(seq $((${STARTUP_WAIT:-20} * 5))); do curl -s -o /dev/null "$BASE/api/health" && break; sleep 0.2; done
 check "health" "$(status "$BASE/api/health")" "200"
@@ -36,7 +36,7 @@ check "admin roles" "$(json "$WORK/body" "(j['name'], j['roles'])")" "('admin', 
 check "bad bearer -> 401" "$(anon -H 'Authorization: Bearer 00ff' "$BASE/api/v1/whoami")" "401"
 check "401 error is JSON with code" "$(json "$WORK/body" "j['code']")" "unauthorized"
 check "anonymous write -> 401" "$(anon -X PUT --data-binary 'x' "$BASE/generic/anon.bin")" "401"
-check "challenge header" "$(curl -s -o /dev/null -D - -X PUT --data-binary x "$BASE/generic/anon.bin" | grep -i '^www-authenticate' | tr -d '\r')" 'www-authenticate: Basic realm="museum"'
+check "challenge header" "$(curl -s -o /dev/null -D - -X PUT --data-binary x "$BASE/generic/anon.bin" | grep -i '^www-authenticate' | tr -d '\r')" 'www-authenticate: Basic realm="kontor"'
 check "create user ci" "$(status -X POST -d '{"name":"ci","password":"s3cret-pass","roles":["writer"]}' "$BASE/api/v1/users")" "201"
 check "short password rejected" "$(status -X POST -d '{"name":"bob","password":"short","roles":["reader"]}' "$BASE/api/v1/users")" "400"
 check "users list" "$(status "$BASE/api/v1/users" > /dev/null; json "$WORK/body" "[u['name'] for u in j['users']]")" "['ci']"

@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Webhook receiver for tests: verifies X-Museum-Signature-256 and logs.
+"""Webhook receiver for tests: verifies X-Kontor-Signature-256 and logs.
 
     webhook_receiver.py <port> <secret> <log.jsonl> [fail_first]
 
 Answers 500 to the first `fail_first` non-ping requests (to exercise
-museum's retry), then 200; pings are always accepted.  Every request is one JSON line in the log:
+kontor's retry), then 200; pings are always accepted.  Every request is one JSON line in the log:
 {"n", "status", "event", "delivery", "signature_ok", "body"}.
 """
 import hashlib, hmac, json, sys
@@ -18,15 +18,15 @@ class Hook(BaseHTTPRequestHandler):
     def do_POST(self):
         raw = self.rfile.read(int(self.headers.get("Content-Length", "0")))
         want = "sha256=" + hmac.new(SECRET, raw, hashlib.sha256).hexdigest()
-        got = self.headers.get("X-Museum-Signature-256", "")
-        event = self.headers.get("X-Museum-Event")
+        got = self.headers.get("X-Kontor-Signature-256", "")
+        event = self.headers.get("X-Kontor-Event")
         if event != "ping":
             COUNT[0] += 1
         status = 500 if event != "ping" and COUNT[0] <= FAIL_FIRST else 200
         with open(LOG, "a") as f:
             f.write(json.dumps({"n": COUNT[0], "status": status,
                                 "event": event,
-                                "delivery": self.headers.get("X-Museum-Delivery"),
+                                "delivery": self.headers.get("X-Kontor-Delivery"),
                                 "content_type": self.headers.get("Content-Type"),
                                 "signature_ok": hmac.compare_digest(want, got),
                                 "body": json.loads(raw or b"null")}) + "\n")

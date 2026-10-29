@@ -1,4 +1,4 @@
-# museum.graph — dependency graph over Exodus projects and rebuild planning.
+# kontor.graph — dependency graph over Exodus projects and rebuild planning.
 #
 # The graph is built from the stored manifests (data/exodus/<name>/<version>/
 # exodus.json). For each project the newest version is the node; its
@@ -10,7 +10,7 @@
 #
 # Edge lists are kept as "name\tspec\n..." strings per project.
 
-- namespace: museum.graph
+- namespace: kontor.graph
 
 - import: "text.aiml"
 - import: "store.aiml"
@@ -43,7 +43,7 @@
     args: [[data_dir, string], [name, string]]
     return: string
     body:
-      - decl: [versions, list<string>, { call: [museum.store.list_subdirs, "${data_dir}/exodus/${name}"] }]
+      - decl: [versions, list<string>, { call: [kontor.store.list_subdirs, "${data_dir}/exodus/${name}"] }]
       - decl: [best, string, ""]
       - decl: [idx, i32, 0]
       - while:
@@ -52,7 +52,7 @@
             - decl: [cand, string, { call: [versions.get, idx] }]
             - decl: [has_manifest, bool, { call: [io.exists, "${data_dir}/exodus/${name}/${cand}/exodus.json"] }]
             - if:
-                condition: { and: [has_manifest, { or: [{ eq: [best.len, 0] }, { gt: [{ call: [museum.text.version_cmp, cand, best] }, 0] }] }] }
+                condition: { and: [has_manifest, { or: [{ eq: [best.len, 0] }, { gt: [{ call: [kontor.text.version_cmp, cand, best] }, 0] }] }] }
                 then:
                   - set: [best, cand]
             - set: [idx, { +: [idx, 1] }]
@@ -66,7 +66,7 @@
     args: [[data_dir, string], [name, string], [version, string]]
     return: string
     body:
-      - decl: [versions, list<string>, { call: [museum.store.list_subdirs, "${data_dir}/exodus/${name}"] }]
+      - decl: [versions, list<string>, { call: [kontor.store.list_subdirs, "${data_dir}/exodus/${name}"] }]
       - decl: [best, string, ""]
       - decl: [idx, i32, 0]
       - while:
@@ -75,7 +75,7 @@
             - decl: [cand, string, { call: [versions.get, idx] }]
             - decl: [is_older, i32, 0]
             - if:
-                condition: { lt: [{ call: [museum.text.version_cmp, cand, version] }, 0] }
+                condition: { lt: [{ call: [kontor.text.version_cmp, cand, version] }, 0] }
                 then:
                   - set: [is_older, 1]
             - decl: [has_pkg, bool, { call: [io.exists, "${data_dir}/exodus/${name}/${cand}/package.sha256"] }]
@@ -83,7 +83,7 @@
                 condition: { and: [{ eq: [is_older, 1] }, has_pkg] }
                 then:
                   - if:
-                      condition: { or: [{ eq: [best.len, 0] }, { gt: [{ call: [museum.text.version_cmp, cand, best] }, 0] }] }
+                      condition: { or: [{ eq: [best.len, 0] }, { gt: [{ call: [kontor.text.version_cmp, cand, best] }, 0] }] }
                       then:
                         - set: [best, cand]
             - set: [idx, { +: [idx, 1] }]
@@ -91,7 +91,7 @@
           condition: { eq: [best.len, 0] }
           then:
             - return: [""]
-      - return: [{ call: [museum.store.read_text, "${data_dir}/exodus/${name}/${best}/package.sha256"] }]
+      - return: [{ call: [kontor.store.read_text, "${data_dir}/exodus/${name}/${best}/package.sha256"] }]
 
 # Spec of `target` in an edge string, or "\u0001" (absent marker) when `target`
 # is not listed. An empty spec means "any / latest".
@@ -174,8 +174,8 @@
             - if:
                 condition: { gt: [tab, 0] }
                 then:
-                  - decl: [edge_name, string, { call: [museum.text.json_str, { call: [line.substr, 0, tab] }] }]
-                  - decl: [edge_spec, string, { call: [museum.text.json_str, { call: [line.substr, { +: [tab, 1] }] }] }]
+                  - decl: [edge_name, string, { call: [kontor.text.json_str, { call: [line.substr, 0, tab] }] }]
+                  - decl: [edge_spec, string, { call: [kontor.text.json_str, { call: [line.substr, { +: [tab, 1] }] }] }]
                   - if:
                       condition: { gt: [emitted, 0] }
                       then:
@@ -200,20 +200,20 @@
           name: load
           args: [[data_dir, string]]
           body:
-            - decl: [projects, list<string>, { call: [museum.store.list_subdirs, "${data_dir}/exodus"] }]
+            - decl: [projects, list<string>, { call: [kontor.store.list_subdirs, "${data_dir}/exodus"] }]
             - decl: [idx, i32, 0]
             - while:
                 condition: { lt: [idx, projects.len] }
                 body:
                   - decl: [name, string, { call: [projects.get, idx] }]
-                  - decl: [version, string, { call: [museum.graph.newest_version, data_dir, name] }]
+                  - decl: [version, string, { call: [kontor.graph.newest_version, data_dir, name] }]
                   - if:
                       condition: { gt: [version.len, 0] }
                       then:
                         - decl: [doc, ptr<yaml_doc>, { call: [yaml.parse_file, "${data_dir}/exodus/${name}/${version}/exodus.json"] }]
                         - decl: [root, ptr<yaml_node>, { call: [yaml.root, doc] }]
-                        - decl: [deps, string, { call: [museum.graph.edge_lines, { call: [yaml.get, root, "dependencies"] }] }]
-                        - decl: [apts, string, { call: [museum.graph.edge_lines, { call: [yaml.get, root, "apt_packages"] }] }]
+                        - decl: [deps, string, { call: [kontor.graph.edge_lines, { call: [yaml.get, root, "dependencies"] }] }]
+                        - decl: [apts, string, { call: [kontor.graph.edge_lines, { call: [yaml.get, root, "apt_packages"] }] }]
                         - call: [yaml.free, doc]
                         - call: [<.names.push, name]
                         - call: [<.latest.put, name, version]
@@ -244,9 +244,9 @@
                   - if:
                       condition: { eq: [is_apt, 1] }
                       then:
-                        - decl: [pin, string, { call: [museum.graph.edge_spec, { call: [<.apt.get, proj] }, name] }]
+                        - decl: [pin, string, { call: [kontor.graph.edge_spec, { call: [<.apt.get, proj] }, name] }]
                         - if:
-                            condition: { eq: [{ call: [museum.graph.is_absent, pin] }, 0] }
+                            condition: { eq: [{ call: [kontor.graph.is_absent, pin] }, 0] }
                             then:
                               - if:
                                   condition: { or: [{ eq: [version.len, 0] }, { neq: [pin, version] }] }
@@ -258,17 +258,17 @@
                         - if:
                             condition: { neq: [proj, name] }
                             then:
-                              - decl: [spec, string, { call: [museum.graph.edge_spec, { call: [<.deps.get, proj] }, name] }]
+                              - decl: [spec, string, { call: [kontor.graph.edge_spec, { call: [<.deps.get, proj] }, name] }]
                               - if:
-                                  condition: { eq: [{ call: [museum.graph.is_absent, spec] }, 0] }
+                                  condition: { eq: [{ call: [kontor.graph.is_absent, spec] }, 0] }
                                   then:
                                     - if:
-                                        condition: { eq: [{ call: [museum.graph.spec_accepts, spec, version] }, 1] }
+                                        condition: { eq: [{ call: [kontor.graph.spec_accepts, spec, version] }, 1] }
                                         then:
                                           - call: [affected.push, proj]
                                         else:
-                                          - decl: [proj_json, string, { call: [museum.text.json_str, proj] }]
-                                          - decl: [spec_json, string, { call: [museum.text.json_str, spec] }]
+                                          - decl: [proj_json, string, { call: [kontor.text.json_str, proj] }]
+                                          - decl: [spec_json, string, { call: [kontor.text.json_str, spec] }]
                                           - if:
                                               condition: { gt: [outdated.len, 0] }
                                               then:
@@ -298,9 +298,9 @@
                         - if:
                             condition: { and: [{ eq: [already, 0] }, { eq: [is_root, 0] }] }
                             then:
-                              - decl: [spec, string, { call: [museum.graph.edge_spec, { call: [<.deps.get, proj] }, changed] }]
+                              - decl: [spec, string, { call: [kontor.graph.edge_spec, { call: [<.deps.get, proj] }, changed] }]
                               - if:
-                                  condition: { eq: [{ call: [museum.graph.is_absent, spec] }, 0] }
+                                  condition: { eq: [{ call: [kontor.graph.is_absent, spec] }, 0] }
                                   then:
                                     - call: [affected.push, proj]
                         - set: [pidx, { +: [pidx, 1] }]
@@ -334,9 +334,9 @@
                               - if:
                                   condition: { neq: [other, cand] }
                                   then:
-                                    - decl: [dep_on, string, { call: [museum.graph.edge_spec, cand_edges, other] }]
+                                    - decl: [dep_on, string, { call: [kontor.graph.edge_spec, cand_edges, other] }]
                                     - if:
-                                        condition: { eq: [{ call: [museum.graph.is_absent, dep_on] }, 0] }
+                                        condition: { eq: [{ call: [kontor.graph.is_absent, dep_on] }, 0] }
                                         then:
                                           - set: [is_blocked, 1]
                               - set: [oidx, { +: [oidx, 1] }]
@@ -353,7 +353,7 @@
                         - set: [progress, 0]
                         - call: [cycle.extend, blocked]
                       else:
-                        - decl: [wave_json, string, { call: [museum.text.json_list, ready] }]
+                        - decl: [wave_json, string, { call: [kontor.text.json_list, ready] }]
                         - if:
                             condition: { gt: [waves.len, 0] }
                             then:
@@ -395,13 +395,13 @@
                                   condition: { neq: [dep, proj] }
                                   then:
                                     - if:
-                                        condition: { eq: [{ call: [museum.graph.is_absent, { call: [museum.graph.edge_spec, proj_edges, dep] }] }, 0] }
+                                        condition: { eq: [{ call: [kontor.graph.is_absent, { call: [kontor.graph.edge_spec, proj_edges, dep] }] }, 0] }
                                         then:
                                           - call: [direct.push, dep]
                               - set: [sidx, { +: [sidx, 1] }]
                         - call: [direct.sort]
-                        - decl: [proj_json, string, { call: [museum.text.json_str, proj] }]
-                        - decl: [direct_json, string, { call: [museum.text.json_list, direct] }]
+                        - decl: [proj_json, string, { call: [kontor.text.json_str, proj] }]
+                        - decl: [direct_json, string, { call: [kontor.text.json_list, direct] }]
                         - if:
                             condition: { gt: [needs.len, 0] }
                             then:
@@ -409,11 +409,11 @@
                         - set: [needs, "${needs}${proj_json}:${direct_json}"]
                   - set: [nidx, { +: [nidx, 1] }]
 
-            - decl: [kind_json, string, { call: [museum.text.json_str, kind] }]
-            - decl: [name_json, string, { call: [museum.text.json_str, name] }]
-            - decl: [version_json, string, { call: [museum.text.json_str, version] }]
-            - decl: [cycle_json, string, { call: [museum.text.json_list, cycle] }]
-            - decl: [current_json, string, { call: [museum.text.json_list, up_to_date] }]
+            - decl: [kind_json, string, { call: [kontor.text.json_str, kind] }]
+            - decl: [name_json, string, { call: [kontor.text.json_str, name] }]
+            - decl: [version_json, string, { call: [kontor.text.json_str, version] }]
+            - decl: [cycle_json, string, { call: [kontor.text.json_list, cycle] }]
+            - decl: [current_json, string, { call: [kontor.text.json_list, up_to_date] }]
             - decl: [total, i32, affected.len]
             - return: ["{\"trigger\":{\"kind\":${kind_json},\"name\":${name_json},\"version\":${version_json}},\"rebuild_count\":${total},\"rebuild_waves\":[${waves}],\"outdated_pins\":[${outdated}],\"up_to_date\":${current_json},\"cycles\":${cycle_json},\"needs\":{${needs}}}"]
 
@@ -430,10 +430,10 @@
                 body:
                   - decl: [proj, string, { call: [<.names.get, idx] }]
                   - decl: [version, string, { call: [<.latest.get, proj] }]
-                  - decl: [deps_json, string, { call: [museum.graph.edges_json, { call: [<.deps.get, proj] }] }]
-                  - decl: [apt_json, string, { call: [museum.graph.edges_json, { call: [<.apt.get, proj] }] }]
-                  - decl: [proj_json, string, { call: [museum.text.json_str, proj] }]
-                  - decl: [ver_json, string, { call: [museum.text.json_str, version] }]
+                  - decl: [deps_json, string, { call: [kontor.graph.edges_json, { call: [<.deps.get, proj] }] }]
+                  - decl: [apt_json, string, { call: [kontor.graph.edges_json, { call: [<.apt.get, proj] }] }]
+                  - decl: [proj_json, string, { call: [kontor.text.json_str, proj] }]
+                  - decl: [ver_json, string, { call: [kontor.text.json_str, version] }]
                   - if:
                       condition: { gt: [idx, 0] }
                       then:

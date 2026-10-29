@@ -1,4 +1,4 @@
-# museum.hooks — webhook subscriptions and at-least-once delivery
+# kontor.hooks — webhook subscriptions and at-least-once delivery
 # (contract doc/ecosystem.md §4).
 #
 # Storage below <data>/hooks/ (one file per record, written atomically):
@@ -13,7 +13,7 @@
 # "failed".  Handlers only ever ADD queue files and the worker owns them after
 # that, so the two never write the same file.
 
-- namespace: museum.hooks
+- namespace: kontor.hooks
 
 - import: "text.aiml"
 - import: "store.aiml"
@@ -66,8 +66,8 @@
                   - set: [events_csv, "*"]
             - decl: [sub_id, string, { call: [math.random_hex, 8] }]
             - decl: [now_ms, i64, { call: [time.now] }]
-            - decl: [body, string, "{\"id\":\"${sub_id}\",\"url\":${{ call: [museum.text.json_str, target] }},\"secret\":${{ call: [museum.text.json_str, secret] }},\"events\":${{ call: [museum.auth.csv_json, events_csv] }},\"created_ms\":${now_ms}}"]
-            - call: [museum.store.write_text, <.data_dir, "${{ call: [<.hooks_dir] }}/subs", sub_id, body]
+            - decl: [body, string, "{\"id\":\"${sub_id}\",\"url\":${{ call: [kontor.text.json_str, target] }},\"secret\":${{ call: [kontor.text.json_str, secret] }},\"events\":${{ call: [kontor.auth.csv_json, events_csv] }},\"created_ms\":${now_ms}}"]
+            - call: [kontor.store.write_text, <.data_dir, "${{ call: [<.hooks_dir] }}/subs", sub_id, body]
             - return: [sub_id]
 
       - def:
@@ -83,7 +83,7 @@
           return: i32
           body:
             - if:
-                condition: { or: [{ eq: [{ call: [museum.auth.valid_name, sub_id] }, 0] }, { not: [{ call: [io.exists, { call: [<.sub_path, sub_id] }] }] }] }
+                condition: { or: [{ eq: [{ call: [kontor.auth.valid_name, sub_id] }, 0] }, { not: [{ call: [io.exists, { call: [<.sub_path, sub_id] }] }] }] }
                 then:
                   - return: [0]
             - return: [1]
@@ -105,7 +105,7 @@
           name: subs_json
           return: string
           body:
-            - decl: [ids, list<string>, { call: [museum.store.list_files, "${{ call: [<.hooks_dir] }}/subs"] }]
+            - decl: [ids, list<string>, { call: [kontor.store.list_files, "${{ call: [<.hooks_dir] }}/subs"] }]
             - decl: [out, string, ""]
             - decl: [idx, i32, 0]
             - while:
@@ -115,14 +115,14 @@
                   - decl: [doc, ptr<yaml_doc>, { call: [yaml.parse_file, { call: [<.sub_path, sub_id] }] }]
                   - decl: [root, ptr<yaml_node>, { call: [yaml.root, doc] }]
                   - decl: [target, string, { call: [yaml.scalar, { call: [yaml.get, root, "url"] }] }]
-                  - decl: [events_csv, string, { call: [museum.auth.seq_csv, { call: [yaml.get, root, "events"] }] }]
+                  - decl: [events_csv, string, { call: [kontor.auth.seq_csv, { call: [yaml.get, root, "events"] }] }]
                   - decl: [created, string, { call: [yaml.scalar, { call: [yaml.get, root, "created_ms"] }] }]
                   - call: [yaml.free, doc]
                   - if:
                       condition: { gt: [out.len, 0] }
                       then:
                         - set: [out, "${out},"]
-                  - set: [out, "${out}{\"id\":\"${sub_id}\",\"url\":${{ call: [museum.text.json_str, target] }},\"events\":${{ call: [museum.auth.csv_json, events_csv] }},\"created_ms\":${created}}"]
+                  - set: [out, "${out}{\"id\":\"${sub_id}\",\"url\":${{ call: [kontor.text.json_str, target] }},\"events\":${{ call: [kontor.auth.csv_json, events_csv] }},\"created_ms\":${created}}"]
                   - set: [idx, { +: [idx, 1] }]
             - return: ["[${out}]"]
 
@@ -135,12 +135,12 @@
           body:
             - decl: [delivery, string, { call: [math.random_hex, 16] }]
             - decl: [now_ms, i64, { call: [time.now] }]
-            - decl: [museum_json, string, { call: [museum.text.json_str, <.public_url] }]
-            - decl: [payload, string, "{\"event\":${{ call: [museum.text.json_str, event] }},\"delivery\":\"${delivery}\",\"timestamp_ms\":${now_ms},\"museum\":${museum_json},\"data\":${data_json}}"]
+            - decl: [kontor_json, string, { call: [kontor.text.json_str, <.public_url] }]
+            - decl: [payload, string, "{\"event\":${{ call: [kontor.text.json_str, event] }},\"delivery\":\"${delivery}\",\"timestamp_ms\":${now_ms},\"kontor\":${kontor_json},\"data\":${data_json}}"]
             - decl: [log_dir, string, "${{ call: [<.hooks_dir] }}/log/${sub_id}"]
-            - call: [museum.store.write_text, <.data_dir, log_dir, "${delivery}.body", payload]
+            - call: [kontor.store.write_text, <.data_dir, log_dir, "${delivery}.body", payload]
             - call: [<.write_log, sub_id, delivery, event, "\"attempts\":0,\"status\":\"pending\",\"last_code\":0"]
-            - call: [museum.store.write_text, <.data_dir, "${{ call: [<.hooks_dir] }}/queue", delivery, "{\"delivery\":\"${delivery}\",\"sub\":\"${sub_id}\",\"event\":${{ call: [museum.text.json_str, event] }},\"attempt\":0,\"next_ms\":0}"]
+            - call: [kontor.store.write_text, <.data_dir, "${{ call: [<.hooks_dir] }}/queue", delivery, "{\"delivery\":\"${delivery}\",\"sub\":\"${sub_id}\",\"event\":${{ call: [kontor.text.json_str, event] }},\"attempt\":0,\"next_ms\":0}"]
             - return: [delivery]
 
       # Fans `event` out to every subscription listening for it ("*" = all).
@@ -149,7 +149,7 @@
           args: [[event, string], [data_json, string]]
           return: i32
           body:
-            - decl: [ids, list<string>, { call: [museum.store.list_files, "${{ call: [<.hooks_dir] }}/subs"] }]
+            - decl: [ids, list<string>, { call: [kontor.store.list_files, "${{ call: [<.hooks_dir] }}/subs"] }]
             - decl: [queued, i32, 0]
             - decl: [idx, i32, 0]
             - while:
@@ -157,9 +157,9 @@
                 body:
                   - decl: [sub_id, string, { call: [ids.get, idx] }]
                   - decl: [doc, ptr<yaml_doc>, { call: [yaml.parse_file, { call: [<.sub_path, sub_id] }] }]
-                  - decl: [events_csv, string, { call: [museum.auth.seq_csv, { call: [yaml.get, { call: [yaml.root, doc] }, "events"] }] }]
+                  - decl: [events_csv, string, { call: [kontor.auth.seq_csv, { call: [yaml.get, { call: [yaml.root, doc] }, "events"] }] }]
                   - call: [yaml.free, doc]
-                  - decl: [wanted, list<string>, { call: [museum.auth.csv_list, events_csv] }]
+                  - decl: [wanted, list<string>, { call: [kontor.auth.csv_list, events_csv] }]
                   - if:
                       condition: { or: [{ eq: [{ call: [wanted.contains, "*"] }, 1] }, { eq: [{ call: [wanted.contains, event] }, 1] }] }
                       then:
@@ -174,7 +174,7 @@
           args: [[sub_id, string], [delivery, string], [event, string], [state, string]]
           body:
             - decl: [now_ms, i64, { call: [time.now] }]
-            - call: [museum.store.write_text, <.data_dir, "${{ call: [<.hooks_dir] }}/log/${sub_id}", delivery, "{\"delivery\":\"${delivery}\",\"event\":${{ call: [museum.text.json_str, event] }},${state},\"updated_ms\":${now_ms}}"]
+            - call: [kontor.store.write_text, <.data_dir, "${{ call: [<.hooks_dir] }}/log/${sub_id}", delivery, "{\"delivery\":\"${delivery}\",\"event\":${{ call: [kontor.text.json_str, event] }},${state},\"updated_ms\":${now_ms}}"]
 
       - def:
           name: deliveries_json
@@ -182,7 +182,7 @@
           return: string
           body:
             - decl: [log_dir, string, "${{ call: [<.hooks_dir] }}/log/${sub_id}"]
-            - decl: [files, list<string>, { call: [museum.store.list_files, log_dir] }]
+            - decl: [files, list<string>, { call: [kontor.store.list_files, log_dir] }]
             - decl: [out, string, ""]
             - decl: [idx, i32, 0]
             - while:
@@ -196,7 +196,7 @@
                             condition: { gt: [out.len, 0] }
                             then:
                               - set: [out, "${out},"]
-                        - decl: [entry_json, string, { call: [museum.store.read_text, "${log_dir}/${name}"] }]
+                        - decl: [entry_json, string, { call: [kontor.store.read_text, "${log_dir}/${name}"] }]
                         - set: [out, "${out}${entry_json}"]
                   - set: [idx, { +: [idx, 1] }]
             - return: ["[${out}]"]
@@ -208,7 +208,7 @@
           return: i32
           body:
             - if:
-                condition: { or: [{ eq: [{ call: [<.exists, sub_id] }, 0] }, { eq: [{ call: [museum.auth.valid_name, delivery] }, 0] }] }
+                condition: { or: [{ eq: [{ call: [<.exists, sub_id] }, 0] }, { eq: [{ call: [kontor.auth.valid_name, delivery] }, 0] }] }
                 then:
                   - return: [0]
             - decl: [log_dir, string, "${{ call: [<.hooks_dir] }}/log/${sub_id}"]
@@ -220,7 +220,7 @@
             - decl: [event, string, { call: [yaml.scalar, { call: [yaml.get, { call: [yaml.root, doc] }, "event"] }] }]
             - call: [yaml.free, doc]
             - call: [<.write_log, sub_id, delivery, event, "\"attempts\":0,\"status\":\"pending\",\"last_code\":0"]
-            - call: [museum.store.write_text, <.data_dir, "${{ call: [<.hooks_dir] }}/queue", delivery, "{\"delivery\":\"${delivery}\",\"sub\":\"${sub_id}\",\"event\":${{ call: [museum.text.json_str, event] }},\"attempt\":0,\"next_ms\":0}"]
+            - call: [kontor.store.write_text, <.data_dir, "${{ call: [<.hooks_dir] }}/queue", delivery, "{\"delivery\":\"${delivery}\",\"sub\":\"${sub_id}\",\"event\":${{ call: [kontor.text.json_str, event] }},\"attempt\":0,\"next_ms\":0}"]
             - return: [1]
 
       # ── delivery (worker thread) ─────────────────────────────────────────
@@ -234,10 +234,10 @@
             - decl: [client, http_client_handle, { call: [http.new_request, "POST", dest] }]
             - decl: [signature, string, { call: [hash.hmac_sha256, secret, payload] }]
             - call: [client.headers.put, "Content-Type", "application/json"]
-            - call: [client.headers.put, "X-Museum-Event", event]
-            - call: [client.headers.put, "X-Museum-Delivery", delivery]
-            - call: [client.headers.put, "X-Museum-Signature-256", "sha256=${signature}"]
-            - call: [client.headers.put, "User-Agent", "museum-webhooks/1"]
+            - call: [client.headers.put, "X-Kontor-Event", event]
+            - call: [client.headers.put, "X-Kontor-Delivery", delivery]
+            - call: [client.headers.put, "X-Kontor-Signature-256", "sha256=${signature}"]
+            - call: [client.headers.put, "User-Agent", "kontor-webhooks/1"]
             - set: [client.body, payload]
             - set: [client.timeout, 10000]
             - decl: [answer, http_response_handle, { call: [client.send] }]
@@ -256,7 +256,7 @@
           return: i32
           body:
             - decl: [queue_dir, string, "${{ call: [<.hooks_dir] }}/queue"]
-            - decl: [files, list<string>, { call: [museum.store.list_files, queue_dir] }]
+            - decl: [files, list<string>, { call: [kontor.store.list_files, queue_dir] }]
             - decl: [now_ms, i64, { call: [time.now] }]
             - decl: [tried, i32, 0]
             - decl: [idx, i32, 0]
@@ -304,7 +304,7 @@
                   - call: [<.write_log, sub_id, delivery, event, "\"attempts\":${done},\"status\":\"delivered\",\"last_code\":${code}"]
                   - call: [io.remove, qpath]
                   - return: []
-            - decl: [wait_ms, i64, { call: [museum.hooks.backoff_ms, done] }]
+            - decl: [wait_ms, i64, { call: [kontor.hooks.backoff_ms, done] }]
             - if:
                 condition: { lt: [wait_ms, 0] }
                 then:
@@ -314,14 +314,14 @@
                   - return: []
             - decl: [next_ms, i64, { +: [{ call: [time.now] }, wait_ms] }]
             - call: [<.write_log, sub_id, delivery, event, "\"attempts\":${done},\"status\":\"retrying\",\"last_code\":${code}"]
-            - call: [museum.store.write_text, <.data_dir, "${{ call: [<.hooks_dir] }}/queue", delivery, "{\"delivery\":\"${delivery}\",\"sub\":\"${sub_id}\",\"event\":${{ call: [museum.text.json_str, event] }},\"attempt\":${done},\"next_ms\":${next_ms}}"]
+            - call: [kontor.store.write_text, <.data_dir, "${{ call: [<.hooks_dir] }}/queue", delivery, "{\"delivery\":\"${delivery}\",\"sub\":\"${sub_id}\",\"event\":${{ call: [kontor.text.json_str, event] }},\"attempt\":${done},\"next_ms\":${next_ms}}"]
 
 # Delivery worker: runs on its own thread for the lifetime of the server.
 - def:
     name: worker_loop
     args: [[data_dir, string], [public_url, string]]
     body:
-      - decl: [hub, ptr<museum.hooks.WebhookHub>, { new: museum.hooks.WebhookHub }]
+      - decl: [hub, ptr<kontor.hooks.WebhookHub>, { new: kontor.hooks.WebhookHub }]
       - set: [hub.data_dir, data_dir]
       - set: [hub.public_url, public_url]
       - decl: [running, i32, 1]

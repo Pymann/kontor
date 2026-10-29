@@ -1,10 +1,10 @@
-# museum.store — content-addressed blob storage and small metadata files.
+# kontor.store — content-addressed blob storage and small metadata files.
 #
 # Layout below the data directory:
 #   cas/<aa>/<sha256>      blob bytes, deduplicated by content hash
 #   tmp/                   staging area for atomic writes (write + rename)
 
-- namespace: museum.store
+- namespace: kontor.store
 
 - def:
     name: blob_path
@@ -22,7 +22,7 @@
     return: string
     body:
       - decl: [digest, string, { call: [hash.sha256, payload] }]
-      - decl: [final_path, string, { call: [museum.store.blob_path, data_dir, digest] }]
+      - decl: [final_path, string, { call: [kontor.store.blob_path, data_dir, digest] }]
       - if:
           condition: { call: [io.exists, final_path] }
           then:
@@ -138,7 +138,7 @@
           then:
             - call: [io.remove, src]
             - return: [""]
-      - decl: [final_path, string, { call: [museum.store.blob_path, data_dir, digest] }]
+      - decl: [final_path, string, { call: [kontor.store.blob_path, data_dir, digest] }]
       - if:
           condition: { call: [io.exists, final_path] }
           then:
