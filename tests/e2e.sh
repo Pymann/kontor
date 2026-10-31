@@ -4,6 +4,9 @@
 set -u
 cd "$(dirname "$0")/.."
 AIML_BIN="${AIML_BIN:-aiml}"
+# The built binary when KONTOR_BIN is set (aiml.tool.json, aiml spec/68 §6);
+# the compiler reading the source otherwise.
+if [ -n "${KONTOR_BIN:-}" ]; then KONTOR_RUN=("$KONTOR_BIN"); else KONTOR_RUN=("$AIML_BIN" kontor.aiml --); fi
 PORT="${PORT:-18091}"
 BASE="http://127.0.0.1:$PORT"
 WORK="$(mktemp -d)"
@@ -22,7 +25,7 @@ ADMIN_TOKEN=$(head -c 32 /dev/urandom | sha256sum | cut -d' ' -f1)
 status() { curl -s -o "${OUT:-$WORK/body}" -w '%{http_code}' -H "Authorization: Bearer $ADMIN_TOKEN" "$@"; }
 anon() { curl -s -o "${OUT:-$WORK/body}" -w '%{http_code}' "$@"; }
 
-KONTOR_ADMIN_TOKEN="$ADMIN_TOKEN" "$AIML_BIN" kontor.aiml -- "$PORT" "$DATA" > "$WORK/server.log" 2>&1 &
+KONTOR_ADMIN_TOKEN="$ADMIN_TOKEN" "${KONTOR_RUN[@]}" "$PORT" "$DATA" > "$WORK/server.log" 2>&1 &
 SRV=$!
 for _ in $(seq $((${STARTUP_WAIT:-20} * 5))); do curl -s -o /dev/null "$BASE/api/health" && break; sleep 0.2; done
 check "health" "$(status "$BASE/api/health")" "200"

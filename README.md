@@ -40,6 +40,22 @@ itself; kontor (and cosmos) pass their tests on it.
 aiml kontor.aiml -- 8081 ./data      # port and data directory (defaults: 8081, ./data)
 ```
 
+Built ahead of time it is an ordinary program and needs no compiler to run.
+`exodus.json` takes its compiler from `$AIML` and its runtime from
+`$AIML_VENV/lib` (aiml spec/68 F68-23), so a venv has to be active:
+
+```bash
+. /path/to/venv/env                  # aiml venv /path/to/venv  (aiml spec/68)
+exodus build                         # ./kontor
+./kontor 8081 ./data                 # the same arguments, without the `--`
+
+aiml venv /path/to/venv install kontor --git https://github.com/Pymann/kontor
+```
+
+The install builds kontor with the venv's own compiler, places `bin/kontor`
+and registers the sources as the importable package `@kontor`
+(`aiml.tool.json`, aiml spec/68 §6).
+
 ## API
 
 All endpoints authorize the caller (see [Auth](#auth)). Errors are JSON
@@ -230,7 +246,11 @@ leaves a half-written record; restarting kontor resumes queued deliveries.
 
 ```bash
 AIML_BIN=/path/to/aiml tests/run_all.sh
+AIML_BIN=/path/to/aiml KONTOR_BIN=./kontor tests/run_all.sh   # against the built binary
 ```
+
+`KONTOR_BIN` is what a build pipeline sets: the end-to-end tests then drive
+the program that was just built, not the compiler reading the sources.
 
 Unit tests for the helpers and the graph (`tests/test_*.aiml`) and an
 end-to-end test that starts the server and drives it with curl

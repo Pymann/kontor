@@ -7,6 +7,9 @@
 set -u
 cd "$(dirname "$0")/.."
 AIML_BIN="${AIML_BIN:-aiml}"
+# The built binary when KONTOR_BIN is set (aiml.tool.json, aiml spec/68 §6);
+# the compiler reading the source otherwise.
+if [ -n "${KONTOR_BIN:-}" ]; then KONTOR_RUN=("$KONTOR_BIN"); else KONTOR_RUN=("$AIML_BIN" kontor.aiml --); fi
 PORT="${PORT:-18092}"
 HOOK_A=$((PORT + 1)); HOOK_B=$((PORT + 2))
 BASE="http://127.0.0.1:$PORT"
@@ -37,7 +40,7 @@ SECRET_A="secret-for-receiver-a"; SECRET_B="secret-for-receiver-b"
 touch "$WORK/a.jsonl" "$WORK/b.jsonl"
 python3 tests/webhook_receiver.py "$HOOK_A" "$SECRET_A" "$WORK/a.jsonl" 0 & PIDS="$PIDS $!"
 python3 tests/webhook_receiver.py "$HOOK_B" "$SECRET_B" "$WORK/b.jsonl" 2 & PIDS="$PIDS $!"
-KONTOR_ADMIN_TOKEN="$TOKEN" "$AIML_BIN" kontor.aiml -- "$PORT" "$DATA" > "$WORK/server.log" 2>&1 & PIDS="$PIDS $!"
+KONTOR_ADMIN_TOKEN="$TOKEN" "${KONTOR_RUN[@]}" "$PORT" "$DATA" > "$WORK/server.log" 2>&1 & PIDS="$PIDS $!"
 wait_for "${STARTUP_WAIT:-20}" 'curl -s -o /dev/null "$BASE/api/health"'
 
 echo "webhooks: subscribe"

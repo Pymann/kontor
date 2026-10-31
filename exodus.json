@@ -1,0 +1,40 @@
+{
+    "$schema": "exodus.project.config-1.0",
+    "name": "kontor",
+    "version": "0.1.0",
+    "license": [
+        "MIT"
+    ],
+    "output_type": "executable",
+    "sources": [
+        "kontor.aiml"
+    ],
+    "compiler": {
+        "name": "$AIML",
+        "lang_standard": "17",
+        "flags": []
+    },
+    "linker": {
+        "name": "g++",
+        "flags": [
+            "-Wl,-rpath,$ORIGIN/../lib"
+        ],
+        "libraries": [
+            "aiml",
+            "pthread",
+            "ssl",
+            "crypto",
+            "dl"
+        ],
+        "library_paths": [
+            "$AIML_VENV/lib"
+        ]
+    },
+    "artifact_in_cwd": true,
+    "optimization": "2",
+    "debug": false,
+    "warnings": [],
+    "env": {
+        "AIML_MEM_V3": "1"
+    }
+}

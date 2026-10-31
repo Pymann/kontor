@@ -7,6 +7,9 @@
 set -u
 cd "$(dirname "$0")/.."
 AIML_BIN="${AIML_BIN:-aiml}"
+# The built binary when KONTOR_BIN is set (aiml.tool.json, aiml spec/68 §6);
+# the compiler reading the source otherwise.
+if [ -n "${KONTOR_BIN:-}" ]; then KONTOR_RUN=("$KONTOR_BIN"); else KONTOR_RUN=("$AIML_BIN" kontor.aiml --); fi
 PORT="${PORT:-18094}"
 LDAP_PORT=$((PORT + 300))
 BASE="http://127.0.0.1:$PORT"
@@ -94,7 +97,7 @@ auth:
     group_attr: groups
     session_hours: 1
 YAML
-"$AIML_BIN" kontor.aiml -- "$PORT" "$DATA" > "$WORK/server.log" 2>&1 & PIDS="$PIDS $!"
+"${KONTOR_RUN[@]}" "$PORT" "$DATA" > "$WORK/server.log" 2>&1 & PIDS="$PIDS $!"
 for _ in $(seq 100); do curl -s -o /dev/null "$BASE/api/health" && break; sleep 0.2; done
 
 code() { curl -s -o "$WORK/body" -w '%{http_code}' "$@"; }
