@@ -173,6 +173,15 @@ curl -X PUT --data-binary @exodus.json localhost:8081/exodus/zlib-lite/1.1.0/exo
 curl -X PUT --data-binary @out/libzlib-lite.a localhost:8081/exodus/zlib-lite/1.1.0/package
 ```
 
+An aiml project published as a source archive is installed straight out of
+here, with no git server in between (aiml spec/68 §6.1) — read access is
+anonymous by default (`auth: { anonymous: reader }`):
+
+```bash
+aiml venv /path/to/venv install ufo --kontor http://localhost:8081
+aiml venv /path/to/venv install --all --kontor http://localhost:8081   # the whole toolbox
+```
+
 ```json
 {
   "name": "zlib-lite", "version": "1.1.0", "sha256": "…", "size": 24,
