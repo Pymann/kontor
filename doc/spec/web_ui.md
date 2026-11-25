@@ -45,7 +45,8 @@ browser.
 - **FW-12** The UI files need no authorization (they hold no data); every
   data request the UI makes is authorized as usual.
 - **FW-13** Caching: `index.html` is sent with `Cache-Control: no-cache`;
-  the other files with an `ETag` (the sha256 of the file) and answer a
+  the other files with an `ETag` (the HTTP runtime's validator for
+  file responses) and answer a
   matching `If-None-Match` with `304`. `.wasm` is `application/wasm`.
 - **FW-14** Security headers on every `/ui/` response:
   `Content-Security-Policy: default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; frame-ancestors 'none'`,
@@ -194,8 +195,13 @@ Retention is **opt-in**: without a policy nothing is ever deleted.
   (`exodus/<name>/<version>/tombstone.json`
   `{"deleted_ms","by","reason"}`, manifest and package removed): `GET` answers
   `410 {"code":"gone"}`, and a new `PUT` of the same version stays `409` —
-  a version number is never reused (reproducibility, matching "a published
-  version is not overwritten"). Exodus deletes remove the version from the
+  for anyone without the `admin` right a version number is never reused
+  (reproducibility, matching "a published version is not overwritten").
+- **FW-47a** **Admins may overwrite and rewrite** (owner's decision,
+  2026-11-25): a caller with the `admin` right may `PUT` the manifest or
+  package of a published version again (it is replaced) and of a deleted
+  version (the tombstone goes, the version is live again). Everyone else
+  gets `409` as before. Exodus deletes remove the version from the
   graph; if it was the newest, the graph is reloaded. Generic files and OCI
   tags leave no tombstone (both may be written again, as today).
 - **FW-48** Each deletion emits the webhook event `artifact.deleted`

@@ -434,3 +434,72 @@
                         - set: [kept, "${kept}${head},\"reason\":\"${reason}\"}"]
                   - set: [obj, { +: [obj, 1] }]
             - return: ["{\"delete\":[${dels}],\"kept\":[${kept}],\"bytes\":${total}}"]
+
+      # The stored rules as JSON (GET /api/v1/retention): unset limits are left out.
+      - def:
+          name: policy_json
+          return: string
+          body:
+            - decl: [out, string, ""]
+            - decl: [idx, i32, 0]
+            - while:
+                condition: { lt: [idx, <.r_repo.len] }
+                body:
+                  - decl: [rule, string, "{\"repo\":\"${{ call: [<.r_repo.get, idx] }}\",\"match\":${{ call: [kontor.text.json_str, { call: [<.r_match.get, idx] }] }}"]
+                  - decl: [keep, i64, { call: [<.r_keep.get, idx] }]
+                  - decl: [age, i64, { call: [<.r_age.get, idx] }]
+                  - decl: [unt, i64, { call: [<.r_untagged.get, idx] }]
+                  - if: { condition: { ge: [keep, 0] }, then: [{ set: [rule, "${rule},\"keep_last\":${keep}"] }] }
+                  - if: { condition: { ge: [age, 0] }, then: [{ set: [rule, "${rule},\"max_age_days\":${age}"] }] }
+                  - if: { condition: { ge: [unt, 0] }, then: [{ set: [rule, "${rule},\"untagged_after_days\":${unt}"] }] }
+                  - if: { condition: { gt: [out.len, 0] }, then: [{ set: [out, "${out},"] }] }
+                  - set: [out, "${out}${rule}}"]
+                  - set: [idx, { +: [idx, 1] }]
+            - return: ["{\"schedule\":${{ call: [kontor.text.json_str, <.schedule] }},\"rules\":[${out}]}"]
+
+      # Why an object must stay whatever the rules say (FW-42): "newest",
+      # "dependency", "protected" — or "" when nothing protects it, or
+      # "missing" when it is not among the objects added.
+      - def:
+          name: guard
+          args: [[repo, string], [name, string], [version, string]]
+          return: string
+          body:
+            - decl: [idx, i32, 0]
+            - while:
+                condition: { lt: [idx, <.o_repo.len] }
+                body:
+                  - decl: [orepo, string, { call: [<.o_repo.get, idx] }]
+                  - decl: [oname, string, { call: [<.o_name.get, idx] }]
+                  - decl: [over, string, { call: [<.o_version.get, idx] }]
+                  - if:
+                      condition: { and: [{ eq: [orepo, repo] }, { eq: [oname, name] }, { eq: [over, version] }] }
+                      then:
+                        - decl: [reason, string, { call: [<.verdict, idx, -1, 0] }]
+                        - if:
+                            condition: { eq: [reason, "no_rule"] }
+                            then:
+                              - return: [""]
+                        - return: [reason]
+                  - set: [idx, { +: [idx, 1] }]
+            - return: ["missing"]
+
+      # Objects the plan deletes, as "repo\tname\tversion\tbytes" lines.
+      - def:
+          name: plan_lines
+          args: [[now_ms, i64]]
+          return: list<string>
+          body:
+            - decl: [out, list<string>, []]
+            - decl: [idx, i32, 0]
+            - while:
+                condition: { lt: [idx, <.o_repo.len] }
+                body:
+                  - decl: [rule, i32, { call: [<.rule_for, idx] }]
+                  - decl: [reason, string, { call: [<.verdict, idx, rule, now_ms] }]
+                  - if:
+                      condition: { eq: [reason.len, 0] }
+                      then:
+                        - call: [out.push, "${{ call: [<.o_repo.get, idx] }}\t${{ call: [<.o_name.get, idx] }}\t${{ call: [<.o_version.get, idx] }}\t${{ call: [<.o_bytes.get, idx] }}"]
+                  - set: [idx, { +: [idx, 1] }]
+            - return: [out]

@@ -110,10 +110,14 @@ check "package zlib-lite@1.1.1" "$(status -X PUT --data-binary @"$WORK/z110.bin"
 check "identical bytes -> unchanged" "$(json "$WORK/body" "j['unchanged']")" "True"
 check "identical bytes -> no plan" "$(json "$WORK/body" "j['impact']")" "None"
 
-# A published version is not overwritten: neither its manifest nor its package.
-check "published manifest not overwritten" "$(put_manifest "$WORK/z110.json" zlib-lite 1.1.0)" "409"
-check "published package not overwritten" "$(status -X PUT --data-binary @"$WORK/z100.bin" "$BASE/exodus/zlib-lite/1.1.0/package")" "409"
+# A published version is not overwritten: neither its manifest nor its
+# package -- except by someone with the admin right (web_ui.md FW-47a).
+check "writer pub" "$(status -X POST -d '{"name":"pub","password":"pub-password-1","roles":["writer"]}' "$BASE/api/v1/users")" "201"
+check "published manifest not overwritten" "$(anon -u pub:pub-password-1 -X PUT --data-binary @"$WORK/z110.json" "$BASE/exodus/zlib-lite/1.1.0/exodus.json")" "409"
+check "published package not overwritten" "$(anon -u pub:pub-password-1 -X PUT --data-binary @"$WORK/z100.bin" "$BASE/exodus/zlib-lite/1.1.0/package")" "409"
 check "conflict code" "$(json "$WORK/body" "j['code']")" "conflict"
+check "admin overwrites the manifest" "$(put_manifest "$WORK/z110.json" zlib-lite 1.1.0)" "201"
+check "admin overwrites the package" "$(status -X PUT --data-binary @"$WORK/z110.bin" "$BASE/exodus/zlib-lite/1.1.0/package")" "201"
 
 check "package download" "$(curl -s -o "$WORK/zback.bin" -w '%{http_code}' "$BASE/exodus/zlib-lite/1.1.0/package")" "200"
 cmp -s "$WORK/z110.bin" "$WORK/zback.bin" && pass "package bytes identical (with NULs)" || fail "package bytes differ"

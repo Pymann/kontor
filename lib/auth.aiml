@@ -123,6 +123,8 @@
       # directory/IdP group → role, and the role every external user gets
       - [group_roles, map<string:string>, null, { access: public }]
       - [default_role, string, "reader", { access: public }]
+      # lifetime of a session token from POST /api/v1/sessions (auth.session_hours)
+      - [session_hours, i32, 12, { access: public }]
     methods:
       - def:
           name: auth_dir
@@ -168,6 +170,17 @@
                 condition: { gt: [anon.len, 0] }
                 then:
                   - set: [<.anonymous_role, anon]
+            - decl: [hours_text, string, { call: [yaml.scalar, { call: [yaml.get, auth_node, "session_hours"] }] }]
+            - if:
+                condition: { gt: [hours_text.len, 0] }
+                then:
+                  - decl: [hours, i32, hours_text]
+                  - if:
+                      condition: { gt: [hours, 0] }
+                      then:
+                        - set: [<.session_hours, hours]
+                      else:
+                        - set: [<.config_error, "auth.session_hours must be a whole number > 0"]
             - decl: [sources, string, { call: [kontor.auth.seq_csv, { call: [yaml.get, auth_node, "identity_sources"] }] }]
             - decl: [src_list, list<string>, { call: [kontor.auth.csv_list, sources] }]
             - decl: [sidx, i32, 0]
@@ -384,6 +397,9 @@
             - if:
                 condition: { not: [{ call: [io.exists, upath] }] }
                 then:
+                  # The same work as for a real user, so the answer time does
+                  # not tell whether the name exists (web_ui.md FW-20).
+                  - decl: [dummy, string, { call: [hash.pbkdf2, password, "00000000000000000000000000000000", <.pbkdf2_iterations] }]
                   - return: [who]
             - decl: [doc, ptr<yaml_doc>, { call: [yaml.parse_file, upath] }]
             - decl: [root, ptr<yaml_node>, { call: [yaml.root, doc] }]
@@ -554,8 +570,14 @@
                   - decl: [tok_owner, string, { call: [yaml.scalar, { call: [yaml.get, root, "owner"] }] }]
                   - decl: [label, string, { call: [yaml.scalar, { call: [yaml.get, root, "label"] }] }]
                   - decl: [created, string, { call: [yaml.scalar, { call: [yaml.get, root, "created_ms"] }] }]
+                  - decl: [expires, string, { call: [yaml.scalar, { call: [yaml.get, root, "expires_ms"] }] }]
                   - decl: [roles_csv, string, { call: [kontor.auth.seq_csv, { call: [yaml.get, root, "roles"] }] }]
                   - call: [yaml.free, doc]
+                  - decl: [expiry, string, ""]
+                  - if:
+                      condition: { gt: [expires.len, 0] }
+                      then:
+                        - set: [expiry, ",\"expires_ms\":${expires}"]
                   - if:
                       condition: { or: [{ eq: [owner.len, 0] }, { eq: [owner, tok_owner] }] }
                       then:
@@ -563,7 +585,7 @@
                             condition: { gt: [out.len, 0] }
                             then:
                               - set: [out, "${out},"]
-                        - set: [out, "${out}{\"id\":${{ call: [kontor.text.json_str, tid] }},\"owner\":${{ call: [kontor.text.json_str, tok_owner] }},\"label\":${{ call: [kontor.text.json_str, label] }},\"roles\":${{ call: [kontor.auth.csv_json, roles_csv] }},\"created_ms\":${created}}"]
+                        - set: [out, "${out}{\"id\":${{ call: [kontor.text.json_str, tid] }},\"owner\":${{ call: [kontor.text.json_str, tok_owner] }},\"label\":${{ call: [kontor.text.json_str, label] }},\"roles\":${{ call: [kontor.auth.csv_json, roles_csv] }},\"created_ms\":${created}${expiry}}"]
                   - set: [idx, { +: [idx, 1] }]
             - return: ["[${out}]"]
 
@@ -625,11 +647,11 @@
             - set: [who.roles, { call: [<.roles_for_groups, ident.groups] }]
             - return: [who]
 
-      # Session token for a SAML login: an API token that expires.  Returns
-      # "<id>:<secret>".
+      # Session token for a login (SAML, or POST /api/v1/sessions): an API
+      # token that expires.  Returns "<id>:<secret>".
       - def:
           name: create_session_token
-          args: [[owner, string], [roles_csv, string], [hours, i32]]
+          args: [[owner, string], [roles_csv, string], [hours, i32], [label, string]]
           return: string
           body:
             - decl: [secret, string, { call: [math.random_hex, 32] }]
@@ -638,7 +660,7 @@
             - decl: [now_ms, i64, { call: [time.now] }]
             - decl: [life_ms, i64, { '*': [hours, 3600000] }]
             - decl: [until_ms, i64, { +: [now_ms, life_ms] }]
-            - decl: [body, string, "{\"id\":${{ call: [kontor.text.json_str, token_id] }},\"owner\":${{ call: [kontor.text.json_str, owner] }},\"label\":\"saml session\",\"roles\":${{ call: [kontor.auth.csv_json, roles_csv] }},\"created_ms\":${now_ms},\"expires_ms\":${until_ms}}"]
+            - decl: [body, string, "{\"id\":${{ call: [kontor.text.json_str, token_id] }},\"owner\":${{ call: [kontor.text.json_str, owner] }},\"label\":${{ call: [kontor.text.json_str, label] }},\"roles\":${{ call: [kontor.auth.csv_json, roles_csv] }},\"created_ms\":${now_ms},\"expires_ms\":${until_ms}}"]
             - call: [kontor.store.write_text, <.data_dir, { call: [<.token_dir] }, digest, body]
             - return: ["${token_id}:${secret}"]
 
