@@ -41,6 +41,17 @@ PKG="$(echo "$DL"/aiml-*-linux-x86_64/)"
 "$PKG/bin/aiml" venv "$VENV"
 cp -n "$PKG"/lib/*.so* "$VENV/lib/"
 
+# A venv made from this one by `aiml venv <dir>` (ufo's venv_layer.sh does
+# that) gets compiler and runtime only, without the bundled libraries, and
+# then needs them from the system -- as on a developer machine, where they are
+# installed with apt.  On the runner the tarball's copies play that part.
+if [ -n "${GITHUB_ACTIONS:-}" ]; then
+    sudo mkdir -p /usr/local/lib/aiml-bundle
+    sudo find "$PKG/lib" -maxdepth 1 -name 'lib*.so*' ! -name 'libaiml.so' -exec cp -L {} /usr/local/lib/aiml-bundle/ \;
+    echo /usr/local/lib/aiml-bundle | sudo tee /etc/ld.so.conf.d/aiml-bundle.conf > /dev/null
+    sudo ldconfig
+fi
+
 # shellcheck disable=SC1091
 . "$VENV/env"
 missing="$(ldd "$AIML" "$AIML_VENV/lib/libaiml.so" | grep 'not found' || true)"
