@@ -110,6 +110,11 @@ check "package zlib-lite@1.1.1" "$(status -X PUT --data-binary @"$WORK/z110.bin"
 check "identical bytes -> unchanged" "$(json "$WORK/body" "j['unchanged']")" "True"
 check "identical bytes -> no plan" "$(json "$WORK/body" "j['impact']")" "None"
 
+# A published version is not overwritten: neither its manifest nor its package.
+check "published manifest not overwritten" "$(put_manifest "$WORK/z110.json" zlib-lite 1.1.0)" "409"
+check "published package not overwritten" "$(status -X PUT --data-binary @"$WORK/z100.bin" "$BASE/exodus/zlib-lite/1.1.0/package")" "409"
+check "conflict code" "$(json "$WORK/body" "j['code']")" "conflict"
+
 check "package download" "$(curl -s -o "$WORK/zback.bin" -w '%{http_code}' "$BASE/exodus/zlib-lite/1.1.0/package")" "200"
 cmp -s "$WORK/z110.bin" "$WORK/zback.bin" && pass "package bytes identical (with NULs)" || fail "package bytes differ"
 check "manifest download" "$(status "$BASE/exodus/core/1.0.0/exodus.json")" "200"

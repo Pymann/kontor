@@ -257,6 +257,11 @@
             - if: { condition: { eq: [dir.len, 0] }, then: [{ return: [] }] }
             - decl: [name, string, { call: [xch.param, "name"] }]
             - decl: [version, string, { call: [xch.param, "version"] }]
+            - if:
+                condition: { call: [io.exists, "${dir}/package.sha256"] }
+                then:
+                  - call: [xch.error, 409, "${name}@${version} is published; a version is not overwritten, publish a new one"]
+                  - return: []
             - decl: [text, string, { call: [xch.text] }]
             - if:
                 condition: { eq: [text.len, 0] }
@@ -319,6 +324,11 @@
             - if: { condition: { eq: [dir.len, 0] }, then: [{ return: [] }] }
             - decl: [name, string, { call: [xch.param, "name"] }]
             - decl: [version, string, { call: [xch.param, "version"] }]
+            - if:
+                condition: { call: [io.exists, "${dir}/package.sha256"] }
+                then:
+                  - call: [xch.error, 409, "${name}@${version} is published; a version is not overwritten, publish a new one"]
+                  - return: []
             - if:
                 condition: { not: [{ call: [io.exists, "${dir}/exodus.json"] }] }
                 then:

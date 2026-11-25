@@ -56,6 +56,19 @@ The install builds kontor with the venv's own compiler, places `bin/kontor`
 and registers the sources as the importable package `@kontor`
 (`aiml.tool.json`, aiml spec/68 §6).
 
+Any aiml tool — kontor itself, ufo, cosmos — goes into a kontor and out of it
+with the venv (aiml spec/68 §6.1, §6.3):
+
+```bash
+KONTOR_TOKEN=… aiml venv /path/to/venv publish --path . --kontor https://kontor.example:8443
+KONTOR_TOKEN=… aiml venv /other/venv install kontor --kontor https://kontor.example:8443
+```
+
+`publish` sends the committed, git-tracked sources as a reproducible archive;
+a version that kontor has is not replaced (`409`), so raise `version` in
+`aiml.tool.json` for the next one.  A private CA goes to the client as
+`AIML_WSS_CA=<ca.crt>`.
+
 ## API
 
 All endpoints authorize the caller (see [Auth](#auth)). Errors are JSON
@@ -67,8 +80,8 @@ exists under `/api/v1/…`; `/generic/…` and `/exodus/…` have `/api/v1/` ali
 | Method | Path | Right | |
 |---|---|---|---|
 | PUT/GET | `/generic/<path>` | write/read | Upload / download any file. Optional `X-Checksum-Sha256` header is verified on upload. Downloads support `Range`. Emits `artifact.published`. |
-| PUT/GET | `/exodus/<name>/<version>/exodus.json` | write/read | Project manifest. Name and version must match the URL. Emits `manifest.published`. |
-| PUT/GET | `/exodus/<name>/<version>/package` | write/read | Build output (any bytes). Upload answers with the rebuild plan and emits `package.published`. |
+| PUT/GET | `/exodus/<name>/<version>/exodus.json` | write/read | Project manifest. Name and version must match the URL. Emits `manifest.published`. Once the version's package is there, `409`. |
+| PUT/GET | `/exodus/<name>/<version>/package` | write/read | Build output (any bytes). Upload answers with the rebuild plan and emits `package.published`. A published version is not overwritten: a second upload is `409`. |
 | GET | `/api/v1/graph` | read | All projects (newest version) with their dependency and apt edges. |
 | GET | `/api/v1/impact?project=<name>&version=<v>` | read | Rebuild plan for a new project version. |
 | GET | `/api/v1/impact?apt=<pkg>&version=<v>` | read | Rebuild plan for a system package version. |
