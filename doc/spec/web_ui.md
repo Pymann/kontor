@@ -231,6 +231,15 @@ an aiml program, `ui/kontor_ui.aiml`, drawn with aiml's UI widgets
 (aiml spec/44_3) on a canvas and compiled with aiml's wasm32 target
 (emscripten, the frame loop of aiml `doc/wasm_frame_loop.md`).
 
+- **FW-79** **Structure** (owner's rule, 2026-11-25): the UI program is one
+  `- classgroup:` (aiml spec/58) from its first commit — instances such as
+  `api` (HTTP client and session), `state` (catalog, users, retention model),
+  `router` and one instance per page, wired by `sees` edges; the entry point
+  only does `{new: KontorUi}` and runs it. **No globals except constants**
+  (`- const:`); everything mutable is a member of a group instance. The same
+  rule holds for the backend code this chapter adds (retention runner,
+  catalog, settings): new state lives in classes, not in `- decl:` at file
+  scope.
 - **FW-80** Source in `ui/`, build output in `ui/dist/` (not committed).
   The UI is built in kontor's CI and shipped in the same release/venv
   install as the binary (`share/kontor/ui`).
