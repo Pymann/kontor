@@ -60,15 +60,17 @@ with an expiry, the same kind SAML logins already mint.
 
 - **FW-20** `POST /api/v1/sessions` with HTTP Basic `user:password` (local
   or LDAP) answers `201`
-  `{"id","owner","roles","token":"<id>:<secret>","expires_ms"}`. The expiry is
+  `{"id","owner","roles","token":"<secret>","expires_ms"}` — the same shape
+  as `POST /api/v1/tokens`; the secret is the Bearer credential, the id is
+  what sign-out revokes. The expiry is
   `auth.session_hours` (default 12). Wrong credentials: `401`, with the same
   delay and message whether the user exists or not. A token as the Basic
   password is refused here (`400`): a session is made from a login, not from
   a token.
 - **FW-21** SAML: the UI's "Sign in with SSO" button goes to
   `/api/v1/sso/saml/login?relay=/ui/`; the existing ACS answers with a
-  `302` to `/ui/#token=<id>:<secret>`. The UI takes the token out of the
-  fragment and removes the fragment from the address bar
+  `302` to `/ui/#token=<id>:<secret>`. The UI takes id and secret out of
+  the fragment and removes the fragment from the address bar
   (`history.replaceState`).
 - **FW-22** The UI keeps the token in memory and in `sessionStorage` (so a
   reload in the same tab stays signed in, a new tab does not). No cookies:
@@ -113,7 +115,10 @@ with an expiry, the same kind SAML logins already mint.
 - **FW-34** Publish metadata: from this chapter on, every successful
   publish (generic PUT, exodus manifest/package PUT, OCI manifest PUT)
   writes `published_ms` and `publisher` (the principal's name) next to the
-  object. Objects from before have `published_ms` from the file's mtime and
+  object: `exodus/<name>/<version>/meta.json` and
+  `generic/<path>/meta.json` (next to `blob.sha256`), each
+  `{"published_ms","publisher"}`. Objects
+  from before have `published_ms` from the file's mtime and
   `publisher: null`.
 - **FW-35** The UI's overview: one table per repository type with a text
   filter; a project row opens its version list (FW-31) with the dependency
@@ -156,8 +161,11 @@ Retention is **opt-in**: without a policy nothing is ever deleted.
      OCI repository;
   2. an exodus version that the newest manifest of another project depends
      on with exactly that version;
-  3. an object marked protected — `PUT /api/v1/protect/<repo>/<name>/<version>`
-     / `DELETE …` (right `admin`); for generic `<name>` is the path.
+  3. an object marked protected —
+     `PUT`/`DELETE /api/v1/protected?repo=<r>&name=<n>&version=<v>` (right
+     `admin`; `version` empty for generic files), listed by
+     `GET /api/v1/protected` `{"protected":[{"repo","name","version"}]}`;
+     stored in `data/config/protected.txt`.
   A dry run lists these as `kept` with the reason (`newest`, `dependency`,
   `protected`).
 - **FW-43** Age is `now − published_ms` (FW-34).
@@ -182,11 +190,14 @@ Retention is **opt-in**: without a policy nothing is ever deleted.
   blobs (mark and sweep over every manifest, package, generic file and OCI
   manifest; a blob younger than 24 hours is kept, so an upload in progress
   is not hit), then expired session tokens (FW-26).
-- **FW-47** Every deleted version leaves a **tombstone**: `GET` answers
+- **FW-47** Every deleted **exodus** version leaves a **tombstone**
+  (`exodus/<name>/<version>/tombstone.json`
+  `{"deleted_ms","by","reason"}`, manifest and package removed): `GET` answers
   `410 {"code":"gone"}`, and a new `PUT` of the same version stays `409` —
   a version number is never reused (reproducibility, matching "a published
   version is not overwritten"). Exodus deletes remove the version from the
-  graph; if it was the newest, the graph is reloaded.
+  graph; if it was the newest, the graph is reloaded. Generic files and OCI
+  tags leave no tombstone (both may be written again, as today).
 - **FW-48** Each deletion emits the webhook event `artifact.deleted`
   `{"repo","name","version","reason":"retention"|"manual"}`.
 - **FW-49** `GET /api/v1/retention/runs` (right `admin`): the last 50 runs,
