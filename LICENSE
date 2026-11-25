@@ -1,0 +1,123 @@
+Pymann Commercial Source License 1.0
+SPDX-License-Identifier: LicenseRef-Pymann-Commercial-1.0
+
+Software:  kontor (https://github.com/Pymann/kontor)
+Licensor:  Nikolai Ehrhardt ("Pymann")
+Copyright (c) 2026 Nikolai Ehrhardt. All rights reserved.
+
+The source code of the Software is published so that it can be read,
+reviewed and evaluated. Publishing it does NOT make the Software open
+source. Any use beyond what Section 2 allows requires a paid Commercial
+License under Section 3.
+
+1. Definitions
+
+  "Software" means the source code, documentation, build files and any
+  binaries built from them, as published in the repository named above,
+  including all earlier and later versions the Licensor publishes under
+  this license.
+
+  "You" means the individual or legal entity exercising rights under this
+  license. A legal entity includes every entity that controls, is
+  controlled by, or is under common control with it ("Affiliates").
+
+  "Production Use" means any use of the Software, or of a modified version
+  of it, other than the uses allowed in Section 2. This includes in
+  particular running the Software to build, store, deliver or operate
+  software, data or services for a business, a public authority, or for
+  customers, whether internal or external, and whether or not for profit.
+
+2. Free uses (no fee)
+
+  Without a Commercial License You may:
+
+  a) read, review and audit the source code;
+  b) build and run the Software for evaluation, for a total of no more than
+     30 days per legal entity, on non-production systems;
+  c) use the Software for private, personal, non-commercial purposes, and
+     for teaching and academic research that is not commissioned or paid
+     for by a third party;
+  d) make modifications for the purposes in a) to c);
+  e) submit bug reports and contributions to the Licensor.
+
+3. Commercial License (annual rental)
+
+  a) Production Use requires a Commercial License. It is granted as a rental
+     for one year at a time ("License Year") and costs EUR 5,000 (five
+     thousand euros) per License Year for this Software, per legal entity together with its
+     Affiliates, plus statutory VAT where
+     applicable.
+  b) The fee is due in advance at the start of each License Year. A
+     Commercial License renews for another License Year when the fee for it
+     is paid, and ends at the end of the last License Year that was paid
+     for.
+  c) A Commercial License is granted by a written agreement or a paid
+     invoice from the Licensor. That agreement may set further terms; where
+     it differs from this license, the agreement prevails.
+  d) During a paid License Year, You and Your Affiliates may install, run,
+     copy and modify the Software for Production Use without limit on the
+     number of users, machines or installations.
+  e) When the Commercial License ends, You must stop all Production Use. You
+     may keep the copies You need to meet legal retention duties.
+
+4. Restrictions
+
+  Unless a written agreement with the Licensor allows it, You may not:
+
+  a) sell, rent, sublicense or otherwise distribute the Software, modified
+     or not, or binaries built from it, to third parties;
+  b) offer the Software, or substantial functionality of it, to third
+     parties as a hosted or managed service;
+  c) remove, alter or obscure this license, the copyright notice or any
+     license check in the Software;
+  d) use the Software in violation of applicable law.
+
+  Sharing an unmodified copy of the public repository, or a link to it,
+  together with this license, is allowed.
+
+5. Third-party components
+
+  Parts of the Software or its dependencies (for example the aiml compiler
+  and runtime, the exodus build tool, OpenSSL) are licensed by their
+  owners under their own licenses. This license does not change those
+  licenses, and nothing in it restricts rights You have under them.
+
+6. Contributions
+
+  By submitting a contribution (code, documentation or other material) to
+  the Software, You grant the Licensor a perpetual, worldwide, royalty-free,
+  irrevocable, non-exclusive license to use, modify, sublicense and
+  distribute the contribution under any terms, including this license and
+  commercial licenses, and You confirm that You have the right to do so.
+
+7. Termination
+
+  Your rights under this license end automatically if You breach it. If You
+  cure the breach within 30 days after the Licensor notifies You, and pay any
+  fee that was due for the time of the breach, Your rights are restored.
+
+8. No warranty, limitation of liability
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT, to the extent
+  permitted by law. The Licensor is liable without limitation only for
+  intent and gross negligence, for injury to life, body or health, and
+  under the German Product Liability Act (Produkthaftungsgesetz). For free
+  uses under Section 2 the Licensor is otherwise not liable. For a
+  Commercial License, liability for slight negligence is limited to breaches
+  of essential contractual duties and to the damage typical and foreseeable
+  for this kind of contract, and in total to the fees paid for the current
+  License Year.
+
+9. Governing law
+
+  This license is governed by the laws of the Federal Republic of Germany,
+  excluding the UN Convention on Contracts for the International Sale of
+  Goods. If You are a merchant (Kaufmann), the courts at the Licensor's
+  place of business have exclusive jurisdiction.
+
+10. Contact
+
+  To obtain a Commercial License, contact the Licensor through
+  https://github.com/Pymann.
