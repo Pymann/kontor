@@ -48,7 +48,10 @@ const ok = (what, cond, more) => {
 
   console.log('session from the fragment (FW-21)');
   calls.length = 0;
+  // Changing only the fragment does not load the page again; the SSO
+  // redirect arrives as a fresh load, so reload with the fragment set.
   await page.goto(`${base}/ui/#token=${session}`);
+  await page.reload();
   const cat = await waitCall('/api/v1/catalog', 15000);
   ok('catalog requested', cat !== null);
   ok('catalog 200', cat && cat.status === 200, cat && cat.status);
