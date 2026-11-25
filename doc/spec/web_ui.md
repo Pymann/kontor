@@ -38,8 +38,10 @@ browser.
   (and whatever else the build emits). `GET /` redirects (`302`) to `/ui/`.
   `GET /ui` redirects to `/ui/`.
 - **FW-11** The directory is `--ui-dir <path>` or `$KONTOR_UI_DIR`; the
-  default is `../share/kontor/ui` relative to the binary (where
-  `aiml venv install` places it), then `./ui/dist`. Without a UI directory
+  default is `../share/kontor/ui` relative to the binary, then
+  `../lib/aiml/kontor/ui/dist` (where `aiml venv install` puts it: the
+  package copy of the source tree, aiml spec/68 F68-54, takes a built
+  `ui/dist` along), then `./ui/dist`. Without a UI directory
   kontor runs as before and `/ui/` answers `404`
   `{"error":"the web UI is not installed (--ui-dir)","code":"not_found"}`.
 - **FW-12** The UI files need no authorization (they hold no data); every
@@ -83,7 +85,9 @@ with an expiry, the same kind SAML logins already mint.
 - **FW-24** Anonymous use: when `auth.anonymous` grants `read`, the UI opens
   on the overview without a login; the login button stays in the header.
   When it is `none`, the UI opens on the login screen.
-- **FW-25** The UI shows a section only when `GET /api/v1/whoami` lists the
+- **FW-25** `GET /api/v1/whoami` also answers `"rights"`: the actions
+  (`read`, `write`, `delete`, `admin`, `webhook_admin`) the caller's roles
+  grant. The UI shows a section only when it lists the
   right for it (overview: `read`; users, retention, settings: `admin`).
   Hiding is a convenience — the backend still checks every call (FW-05).
 - **FW-26** Expired session tokens are swept: the retention run (§5) deletes
@@ -265,7 +269,8 @@ an aiml program, `ui/kontor_ui.aiml`, drawn with aiml's UI widgets
   scope.
 - **FW-80** Source in `ui/`, build output in `ui/dist/` (not committed).
   The UI is built in kontor's CI and shipped in the same release/venv
-  install as the binary (`share/kontor/ui`).
+  install as the binary: `ui/build.sh` before `aiml venv install` puts it
+  into the package directory (FW-11).
 - **FW-81** The UI's state and API client are a layer of their own,
   separate from drawing, so they can be tested without a browser (§9).
 - **FW-82** Works in the current Firefox and Chromium at 1280×800 and down
@@ -294,7 +299,8 @@ It needs from aiml (tracked there, spec first):
   `If-None-Match` (`*`, a list, or a weak tag) with `304` and no body, for
   FW-13 (aiml spec/32_2 F32-2-66).
 
-FW-90, FW-91, FW-93 and FW-94 are implemented in aiml PR #5; FW-92 is open.
+FW-90…FW-94 are implemented in aiml PR #5. The browser login needs
+`base64.encode` in the wasm32 runtime too (aiml PR #6).
 
 ## 9. Tests
 

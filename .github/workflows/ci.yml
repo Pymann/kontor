@@ -59,3 +59,89 @@ jobs:
           aiml venv "$AIML_VENV" install kontor --path .
           aiml venv "$AIML_VENV" list
           test -x "$AIML_VENV/bin/kontor"
+
+  # doc/spec/web_ui.md FW-104: the web UI.  It needs aiml newer than the
+  # last release (http.fetch, the wasm32 runtime, base64 in wasm32), so it
+  # takes the newest green aiml CI run of AIML_UI_BRANCH.
+  web-ui:
+    name: Web UI (wasm32) and its tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      AIML_CACHE: ${{ github.workspace }}/__aiml_cache
+      AIML_MEM_V3: "1"
+      # aiml PR #6 (base64 in the wasm32 runtime); back to master once merged.
+      AIML_UI_BRANCH: ${{ vars.AIML_UI_BRANCH || 'claude/project-thread-a9v6jo' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: System packages
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends g++ libssl-dev curl
+
+      - name: Download aiml
+        env:
+          GH_TOKEN: ${{ github.token }}
+          AIML_CI_BRANCH: ${{ env.AIML_UI_BRANCH }}
+        run: bash .github/ci/setup-aiml.sh "$RUNNER_TEMP/aimlvenv"
+
+      - name: emsdk version of the aiml wasm32 runtime
+        id: emsdk
+        run: |
+          test -f "$AIML_VENV/lib/wasm32/libaiml_wasm.a"
+          echo "version=$(cat "$AIML_VENV/lib/wasm32/emsdk.version")" >> "$GITHUB_OUTPUT"
+
+      - name: Restore emsdk
+        uses: actions/cache@v4
+        with:
+          path: ~/emsdk
+          key: emsdk-${{ steps.emsdk.outputs.version }}
+
+      - name: Install emsdk
+        run: |
+          v="${{ steps.emsdk.outputs.version }}"
+          [ -d ~/emsdk ] || git clone --depth 1 https://github.com/emscripten-core/emsdk.git ~/emsdk
+          cd ~/emsdk
+          [ -x upstream/emscripten/emcc ] || ./emsdk install "$v"
+          ./emsdk activate "$v"
+          echo "EMCC=$HOME/emsdk/upstream/emscripten/emcc" >> "$GITHUB_ENV"
+          echo "EM_CONFIG=$HOME/emsdk/.emscripten" >> "$GITHUB_ENV"
+
+      - name: Build kontor
+        run: aiml build
+
+      # FW-102: the UI's api/store layer natively, against the built kontor.
+      - name: UI logic test
+        env:
+          KONTOR_BIN: ${{ github.workspace }}/kontor
+        run: bash tests/ui_logic.sh
+
+      - name: Build the UI
+        run: bash ui/build.sh
+
+      # FW-103: headless Chromium against kontor serving ui/dist.
+      - name: Browser smoke test
+        run: |
+          mkdir -p "$RUNNER_TEMP/pw" && cd "$RUNNER_TEMP/pw"
+          npm init -y > /dev/null
+          npm install --no-audit --no-fund playwright@1.49.1
+          npx playwright install --with-deps chromium
+          cd "$GITHUB_WORKSPACE"
+          NODE_PATH="$RUNNER_TEMP/pw/node_modules" KONTOR_BIN=./kontor bash tests/ui_smoke.sh "$RUNNER_TEMP/ui.png"
+
+      - name: Upload the UI and a screenshot
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kontor-ui
+          path: |
+            ui/dist
+            ${{ runner.temp }}/ui.png
+          if-no-files-found: warn
+
+      # FW-80: what a venv user gets, UI included (FW-11).
+      - name: Install into the venv with the UI
+        run: |
+          aiml venv "$AIML_VENV" install kontor --path .
+          test -f "$AIML_VENV/lib/aiml/kontor/ui/dist/kontor-ui.wasm"

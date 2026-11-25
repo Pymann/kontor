@@ -562,7 +562,8 @@
       - return: [""]
 
 # Where the web UI may be (web_ui.md FW-11), first that exists wins:
-# --ui-dir, $KONTOR_UI_DIR, <binary>/../share/kontor/ui, ./ui/dist.
+# --ui-dir, $KONTOR_UI_DIR, <binary>/../share/kontor/ui,
+# <binary>/../lib/aiml/kontor/ui/dist (a venv install), ./ui/dist.
 - def:
     name: ui_candidates
     return: list<string>
@@ -587,6 +588,7 @@
             - decl: [real, path, { call: [io.realpath, self] }]
             - decl: [bin_dir, path, { call: [real.parent] }]
             - call: [out.push, "${bin_dir}/../share/kontor/ui"]
+            - call: [out.push, "${bin_dir}/../lib/aiml/kontor/ui/dist"]
       - call: [out.push, "./ui/dist"]
       - return: [out]
 

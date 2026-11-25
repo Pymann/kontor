@@ -7,6 +7,8 @@
 #   1. the release named by AIML_RELEASE (e.g. v1.0.2.4), else the newest
 #      published release, prereleases included (drafts are not visible here);
 #   2. the aiml-linux-x86_64 artifact of the newest green CI run on master.
+# AIML_CI_BRANCH=<branch> skips the releases and takes the newest green CI
+# run of that branch (the web UI needs aiml newer than its last release).
 # The tarball comes with its .sha256 and is checked against it.
 #
 # Usage: setup-aiml.sh <venv-dir>      (needs GH_TOKEN for the gh CLI)
@@ -17,7 +19,10 @@ REPO="${AIML_REPO:-Pymann/aiml}"
 DL="$(mktemp -d)"
 
 tag="${AIML_RELEASE:-}"
-if [ -z "$tag" ]; then
+CI_BRANCH="${AIML_CI_BRANCH:-master}"
+if [ -n "${AIML_CI_BRANCH:-}" ]; then
+    tag=""
+elif [ -z "$tag" ]; then
     tag="$(gh release list -R "$REPO" --exclude-drafts -L 1 --json tagName -q '.[0].tagName' 2>/dev/null || true)"
 fi
 if [ -n "$tag" ] && gh release download "$tag" -R "$REPO" -p 'aiml-*-linux-x86_64.tar.gz*' -D "$DL"; then
@@ -25,8 +30,8 @@ if [ -n "$tag" ] && gh release download "$tag" -R "$REPO" -p 'aiml-*-linux-x86_6
 elif [ -n "${AIML_RELEASE:-}" ]; then
     echo "::error::aiml release $AIML_RELEASE has no linux-x86_64 tarball"; exit 1
 else
-    run="$(gh run list -R "$REPO" -w CI -b master -s success -L 1 --json databaseId -q '.[0].databaseId')"
-    [ -n "$run" ] || { echo "::error::no release and no green CI run in $REPO"; exit 1; }
+    run="$(gh run list -R "$REPO" -w CI -b "$CI_BRANCH" -s success -L 1 --json databaseId -q '.[0].databaseId')"
+    [ -n "$run" ] || { echo "::error::no release and no green CI run on $CI_BRANCH in $REPO"; exit 1; }
     gh run download "$run" -R "$REPO" -n aiml-linux-x86_64 -D "$DL"
     echo "aiml: CI run https://github.com/$REPO/actions/runs/$run"
 fi

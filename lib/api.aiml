@@ -680,7 +680,21 @@
                   - call: [xch.set_header, "www-authenticate", "Basic realm=\"kontor\""]
                   - call: [xch.error, 401, "authentication required"]
                   - return: []
-            - call: [xch.json, 200, "{\"name\":${{ call: [kontor.text.json_str, who.name] }},\"kind\":\"${who.kind}\",\"roles\":${{ call: [kontor.auth.csv_json, who.roles] }}}"]
+            # FW-25: the rights the roles grant, so a client shows what it may use.
+            - decl: [actions, list<string>, ["read", "write", "delete", "admin", "webhook_admin"]]
+            - decl: [granted, string, ""]
+            - decl: [aidx, i32, 0]
+            - while:
+                condition: { lt: [aidx, actions.len] }
+                body:
+                  - decl: [action, string, { call: [actions.get, aidx] }]
+                  - if:
+                      condition: { eq: [{ call: [<.acl.allows, who.roles, action] }, 1] }
+                      then:
+                        - if: { condition: { gt: [granted.len, 0] }, then: [{ set: [granted, "${granted},"] }] }
+                        - set: [granted, "${granted}\"${action}\""]
+                  - set: [aidx, { +: [aidx, 1] }]
+            - call: [xch.json, 200, "{\"name\":${{ call: [kontor.text.json_str, who.name] }},\"kind\":\"${who.kind}\",\"roles\":${{ call: [kontor.auth.csv_json, who.roles] }},\"rights\":[${granted}]}"]
 
       # ── SAML single sign-on (contract §6) ─────────────────────────────────
       # GET /api/v1/sso/saml/login?relay=/path → 302 to the IdP.

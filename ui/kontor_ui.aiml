@@ -1,0 +1,940 @@
+# kontor's web UI (doc/spec/web_ui.md §8), compiled to wasm32.
+#
+# One classgroup (FW-79): `api` talks HTTP and owns the session, `store`
+# holds what the UI shows and knows how to load and change it, `view` draws
+# a frame.  No globals: the frame loop lives in KontorUi.run, so nothing has
+# to reach the group from a free callback.  `api` and `store` never draw
+# (FW-81), so tests/ui_logic.aiml drives them natively against a real
+# kontor without a browser (FW-102).
+
+- import: "../lib/text.aiml"
+
+# ── JSON helpers (JSON is YAML, aiml spec/60) ─────────────────────────────
+
+# The scalar at `key` of the document `text`'s root mapping ("" if absent).
+- def:
+    name: ui_json_field
+    args: [[text, string], [key, string]]
+    return: string
+    body:
+      - if: { condition: { eq: [text.len, 0] }, then: [{ return: [""] }] }
+      - decl: [doc, ptr<yaml_doc>, { call: [yaml.parse, text] }]
+      - decl: [root, ptr<yaml_node>, { call: [yaml.root, doc] }]
+      - decl: [found, string, { call: [yaml.scalar, { call: [yaml.get, root, key] }] }]
+      - call: [yaml.free, doc]
+      - if: { condition: { eq: [found, null] }, then: [{ return: [""] }] }
+      - return: [found]
+
+# "1.5 MiB" — sizes in base 1024 (FW-35).
+- def:
+    name: ui_bytes
+    args: [[count, i64]]
+    return: string
+    body:
+      - if: { condition: { lt: [count, 1024] }, then: [{ return: ["${count} B"] }] }
+      - decl: [units, list<string>, ["KiB", "MiB", "GiB", "TiB"]]
+      - decl: [value, f64, count]
+      - decl: [unit_idx, i32, -1]
+      - while:
+          condition: { and: [{ ge: [value, 1024.0] }, { lt: [unit_idx, 3] }] }
+          body:
+            - set: [value, { /: [value, 1024.0] }]
+            - set: [unit_idx, { +: [unit_idx, 1] }]
+      - decl: [tenths, i64, { "*": [value, 10.0] }]
+      - decl: [whole, i64, { /: [tenths, 10] }]
+      - decl: [frac, i64, { -: [tenths, { "*": [whole, 10] }] }]
+      - return: ["${whole}.${frac} ${{ call: [units.get, unit_idx] }}"]
+
+# ── HTTP and the session ──────────────────────────────────────────────────
+
+- class:
+    name: UiApi
+    members:
+      # "" in the browser (same origin); "http://127.0.0.1:<port>" natively.
+      - [base, string, "", { access: public }]
+      - [token, string, "", { access: public }]
+      - [token_id, string, "", { access: public }]
+      - [status, i32, 0, { access: public }]
+    methods:
+      - def:
+          name: headers
+          return: string
+          body:
+            - decl: [lines, string, "Content-Type: application/json"]
+            - if:
+                condition: { gt: [<.token.len, 0] }
+                then:
+                  - set: [lines, "${lines}\nAuthorization: Bearer ${<.token}"]
+            - return: [lines]
+
+      # One request; the body whatever the status, `status` set (0: no answer).
+      - def:
+          name: call
+          args: [[method, string], [path, string], [body, string]]
+          return: string
+          body:
+            - decl: [answer, string, { call: [http.fetch, method, "${<.base}${path}", { call: [<.headers] }, body] }]
+            - set: [<.status, { call: [http.fetch_status] }]
+            - if: { condition: { eq: [answer, null] }, then: [{ return: [""] }] }
+            - return: [answer]
+
+      - def:
+          name: remember
+          args: [[ident, string], [secret, string]]
+          body:
+            - set: [<.token_id, ident]
+            - set: [<.token, secret]
+            - call: [storage.session_set, "kontor.session", "${ident}:${secret}"]
+
+      # FW-20: a session from user and password.  1 when signed in.
+      - def:
+          name: login
+          args: [[user, string], [password, string]]
+          return: i32
+          body:
+            - decl: [basic, string, { call: [base64.encode, "${user}:${password}"] }]
+            - decl: [answer, string, { call: [http.fetch, "POST", "${<.base}/api/v1/sessions", "Authorization: Basic ${basic}", ""] }]
+            - set: [<.status, { call: [http.fetch_status] }]
+            - if: { condition: { neq: [<.status, 201] }, then: [{ return: [0] }] }
+            - call: [<.remember, { call: [ui_json_field, answer, "id"] }, { call: [ui_json_field, answer, "token"] }]
+            - return: [1]
+
+      # FW-21/FW-22: a session the SSO handed over in the fragment
+      # (#token=<id>:<secret>), else the one this tab kept.  1 when found.
+      - def:
+          name: restore
+          return: i32
+          body:
+            - decl: [frag, string, { call: [storage.hash] }]
+            - decl: [kept, string, ""]
+            - if:
+                condition: { eq: [{ call: [frag.starts_with, "#token="] }, 1] }
+                then:
+                  - set: [kept, { call: [frag.substr, 7] }]
+                  - call: [storage.set_hash, ""]
+                else:
+                  - set: [kept, { call: [storage.session_get, "kontor.session"] }]
+            - if: { condition: { eq: [kept, null] }, then: [{ return: [0] }] }
+            - decl: [colon, i32, { call: [kept.index_of, ":"] }]
+            - if: { condition: { le: [colon, 0] }, then: [{ return: [0] }] }
+            - call: [<.remember, { call: [kept.substr, 0, colon] }, { call: [kept.substr, { +: [colon, 1] }] }]
+            - return: [1]
+
+      # FW-23: revoke the session token, then forget it.
+      - def:
+          name: logout
+          body:
+            - if:
+                condition: { gt: [<.token_id.len, 0] }
+                then:
+                  - decl: [gone, string, { call: [<.call, "DELETE", "/api/v1/tokens/${<.token_id}", ""] }]
+            - call: [<.forget]
+
+      - def:
+          name: forget
+          body:
+            - set: [<.token, ""]
+            - set: [<.token_id, ""]
+            - call: [storage.session_remove, "kontor.session"]
+
+# ── what the UI shows ─────────────────────────────────────────────────────
+
+- class:
+    name: UiStore
+    members:
+      # page: 0 overview, 1 users, 2 retention, 3 settings, 4 login
+      - [page, i32, 0, { access: public }]
+      - [account, string, "", { access: public }]
+      - [rights, string, ",", { access: public }]
+      - [message, string, "", { access: public }]
+      # overview (FW-30, FW-31) and the generic browser (listing.md FL-01)
+      - [totals, string, "", { access: public }]
+      - [projects, list<string>, [], { access: public }]
+      - [project, string, "", { access: public }]
+      - [versions, list<string>, [], { access: public }]
+      - [install, string, "", { access: public }]
+      - [prefix, string, "", { access: public }]
+      - [browsing, i32, 0, { access: public }]
+      - [dirs, list<string>, [], { access: public }]
+      - [files, list<string>, [], { access: public }]
+      # users (FW-70)
+      - [users, list<string>, [], { access: public }]
+      - [user_roles, list<string>, [], { access: public }]
+      - [form_name, string, "", { access: public }]
+      - [form_password, string, "", { access: public }]
+      - [form_roles, string, "reader", { access: public }]
+      # login form
+      - [login_name, string, "", { access: public }]
+      - [login_password, string, "", { access: public }]
+      # retention (FW-48) and settings (FW-60)
+      - [policy, string, "", { access: public }]
+      - [preview, list<string>, [], { access: public }]
+      - [runs, list<string>, [], { access: public }]
+      - [settings, string, "", { access: public }]
+      # what a button asked for, run by perform() after the frame
+      - [todo, string, "", { access: public }]
+      - [todo_arg, string, "", { access: public }]
+    methods:
+      # A button's request; the last one in a frame wins.
+      - def:
+          name: ask
+          args: [[what, string], [arg, string]]
+          body:
+            - set: [<.todo, what]
+            - set: [<.todo_arg, arg]
+
+      - def:
+          name: can
+          args: [[right, string]]
+          return: i32
+          body:
+            - return: [{ call: [<.rights.contains, ",${right},"] }]
+
+# ── drawing state (which widget had focus etc. lives in aiml's ui) ────────
+
+- class:
+    name: UiView
+    members:
+      - [win, window_handle, null, { access: public }]
+      - [width, i32, 1280, { access: public }]
+      - [height, i32, 800, { access: public }]
+
+- classgroup:
+    name: KontorUi
+    instances:
+      - class: UiApi
+        instance: api
+
+      - class: UiStore
+        instance: store
+        sees: [api]
+        methods:
+          # A 401 anywhere ends the session (FW-23).
+          - def:
+              name: answered
+              args: [[what, string]]
+              return: i32
+              body:
+                - decl: [code, i32, <.api.status]
+                - if:
+                    condition: { eq: [code, 401] }
+                    then:
+                      - call: [<.api.forget]
+                      - set: [<.account, ""]
+                      - set: [<.rights, ","]
+                      - set: [<.page, 4]
+                      - set: [<.message, "Your session has ended"]
+                      - return: [0]
+                - if:
+                    condition: { or: [{ lt: [code, 200] }, { ge: [code, 300] }] }
+                    then:
+                      - set: [<.message, "${what} failed (${code})"]
+                      - return: [0]
+                - return: [1]
+
+          # Who am I and what may I (FW-24, FW-25).  1 when kontor answered.
+          - def:
+              name: whoami
+              return: i32
+              body:
+                - decl: [text, string, { call: [<.api.call, "GET", "/api/v1/whoami", ""] }]
+                - if:
+                    condition: { neq: [<.api.status, 200] }
+                    then:
+                      - set: [<.account, ""]
+                      - set: [<.rights, ","]
+                      - if: { condition: { eq: [<.api.status, 401] }, then: [{ call: [<.api.forget] }] }
+                      - return: [0]
+                - decl: [doc, ptr<yaml_doc>, { call: [yaml.parse, text] }]
+                - decl: [root, ptr<yaml_node>, { call: [yaml.root, doc] }]
+                - set: [<.account, { call: [yaml.scalar, { call: [yaml.get, root, "name"] }] }]
+                - decl: [seq, ref<yaml_node>, { call: [yaml.get, root, "rights"] }]
+                - decl: [csv, string, ","]
+                - decl: [idx, i32, 0]
+                - decl: [count, i32, { call: [yaml.size, seq] }]
+                - while:
+                    condition: { lt: [idx, count] }
+                    body:
+                      - set: [csv, "${csv}${{ call: [yaml.scalar, { call: [yaml.item, seq, idx] }] }},"]
+                      - set: [idx, { +: [idx, 1] }]
+                - call: [yaml.free, doc]
+                - set: [<.rights, csv]
+                - return: [1]
+
+          # Start: restore a session, ask who we are, pick the first page.
+          - def:
+              name: start
+              body:
+                - decl: [had, i32, { call: [<.api.restore] }]
+                - decl: [known, i32, { call: [<.whoami] }]
+                - if:
+                    condition: { eq: [{ call: [<.can, "read"] }, 1] }
+                    then:
+                      - set: [<.page, 0]
+                      - call: [<.load_overview]
+                    else:
+                      - set: [<.page, 4]
+
+          - def:
+              name: sign_in
+              return: i32
+              body:
+                - if:
+                    condition: { eq: [{ call: [<.api.login, <.login_name, <.login_password] }, 0] }
+                    then:
+                      - set: [<.message, "Sign-in failed"]
+                      - return: [0]
+                - set: [<.login_password, ""]
+                - decl: [known, i32, { call: [<.whoami] }]
+                - set: [<.message, "Signed in as ${<.account}"]
+                - set: [<.page, 0]
+                - call: [<.load_overview]
+                - return: [1]
+
+          - def:
+              name: sign_out
+              body:
+                - call: [<.api.logout]
+                - decl: [known, i32, { call: [<.whoami] }]
+                - set: [<.message, "Signed out"]
+                - if:
+                    condition: { eq: [{ call: [<.can, "read"] }, 1] }
+                    then:
+                      - set: [<.page, 0]
+                    else:
+                      - set: [<.page, 4]
+
+          # GET /api/v1/catalog → totals and one line per project (FW-30).
+          - def:
+              name: load_overview
+              body:
+                - decl: [text, string, { call: [<.api.call, "GET", "/api/v1/catalog", ""] }]
+                - if: { condition: { eq: [{ call: [<.answered, "Overview"] }, 0] }, then: [{ return: [] }] }
+                - decl: [doc, ptr<yaml_doc>, { call: [yaml.parse, text] }]
+                - decl: [root, ptr<yaml_node>, { call: [yaml.root, doc] }]
+                - decl: [head, ref<yaml_node>, { call: [yaml.get, root, "kontor"] }]
+                - decl: [disk_text, string, { call: [yaml.scalar, { call: [yaml.get, head, "disk_bytes"] }] }]
+                - decl: [disk, i64, disk_text]
+                - decl: [blobs, string, { call: [yaml.scalar, { call: [yaml.get, head, "blob_count"] }] }]
+                - decl: [gen, ref<yaml_node>, { call: [yaml.get, root, "generic"] }]
+                - decl: [gen_files, string, { call: [yaml.scalar, { call: [yaml.get, gen, "files"] }] }]
+                - set: [<.totals, "${blobs} blobs, ${{ call: [ui_bytes, disk] }} on disk, ${gen_files} generic files"]
+                - call: [<.projects.clear]
+                - decl: [seq, ref<yaml_node>, { call: [yaml.get, root, "exodus"] }]
+                - decl: [count, i32, { call: [yaml.size, seq] }]
+                - decl: [idx, i32, 0]
+                - while:
+                    condition: { lt: [idx, count] }
+                    body:
+                      - decl: [item, ref<yaml_node>, { call: [yaml.item, seq, idx] }]
+                      - decl: [name, string, { call: [yaml.scalar, { call: [yaml.get, item, "name"] }] }]
+                      - call: [<.projects.push, name]
+                      - set: [idx, { +: [idx, 1] }]
+                - call: [yaml.free, doc]
+
+          # Versions of one project and its install command (FW-31).
+          - def:
+              name: open_project
+              args: [[name, string]]
+              body:
+                - set: [<.browsing, 0]
+                - set: [<.project, name]
+                - decl: [text, string, { call: [<.api.call, "GET", "/api/v1/catalog/exodus/${name}", ""] }]
+                - call: [<.versions.clear]
+                - set: [<.install, ""]
+                - if: { condition: { eq: [{ call: [<.answered, "Project"] }, 0] }, then: [{ return: [] }] }
+                - decl: [doc, ptr<yaml_doc>, { call: [yaml.parse, text] }]
+                - decl: [root, ptr<yaml_node>, { call: [yaml.root, doc] }]
+                - set: [<.install, { call: [yaml.scalar, { call: [yaml.get, root, "install"] }] }]
+                - decl: [seq, ref<yaml_node>, { call: [yaml.get, root, "versions"] }]
+                - decl: [count, i32, { call: [yaml.size, seq] }]
+                - decl: [idx, i32, 0]
+                - while:
+                    condition: { lt: [idx, count] }
+                    body:
+                      - decl: [item, ref<yaml_node>, { call: [yaml.item, seq, idx] }]
+                      - decl: [version, string, { call: [yaml.scalar, { call: [yaml.get, item, "version"] }] }]
+                      - decl: [size_text, string, { call: [yaml.scalar, { call: [yaml.get, item, "bytes"] }] }]
+                      - decl: [size, i64, size_text]
+                      - decl: [who, string, { call: [yaml.scalar, { call: [yaml.get, item, "publisher"] }] }]
+                      - if: { condition: { eq: [who, null] }, then: [{ set: [who, "-"] }] }
+                      - call: [<.versions.push, "${version}   ${{ call: [ui_bytes, size] }}   ${who}"]
+                      - set: [idx, { +: [idx, 1] }]
+                - call: [yaml.free, doc]
+
+          # One directory of generic files (listing.md FL-01).
+          - def:
+              name: browse
+              args: [[where, string]]
+              body:
+                - set: [<.browsing, 1]
+                - set: [<.prefix, where]
+                - decl: [text, string, { call: [<.api.call, "GET", "/api/v1/list/generic?prefix=${where}", ""] }]
+                - call: [<.dirs.clear]
+                - call: [<.files.clear]
+                - if: { condition: { eq: [{ call: [<.answered, "Listing"] }, 0] }, then: [{ return: [] }] }
+                - decl: [doc, ptr<yaml_doc>, { call: [yaml.parse, text] }]
+                - decl: [root, ptr<yaml_node>, { call: [yaml.root, doc] }]
+                - decl: [dseq, ref<yaml_node>, { call: [yaml.get, root, "dirs"] }]
+                - decl: [dcount, i32, { call: [yaml.size, dseq] }]
+                - decl: [didx, i32, 0]
+                - while:
+                    condition: { lt: [didx, dcount] }
+                    body:
+                      - call: [<.dirs.push, { call: [yaml.scalar, { call: [yaml.item, dseq, didx] }] }]
+                      - set: [didx, { +: [didx, 1] }]
+                - decl: [fseq, ref<yaml_node>, { call: [yaml.get, root, "items"] }]
+                - decl: [fcount, i32, { call: [yaml.size, fseq] }]
+                - decl: [fidx, i32, 0]
+                - while:
+                    condition: { lt: [fidx, fcount] }
+                    body:
+                      - decl: [item, ref<yaml_node>, { call: [yaml.item, fseq, fidx] }]
+                      - decl: [fpath, string, { call: [yaml.scalar, { call: [yaml.get, item, "path"] }] }]
+                      - decl: [size_text, string, { call: [yaml.scalar, { call: [yaml.get, item, "bytes"] }] }]
+                      - decl: [size, i64, size_text]
+                      - call: [<.files.push, "${fpath}   ${{ call: [ui_bytes, size] }}"]
+                      - set: [fidx, { +: [fidx, 1] }]
+                - call: [yaml.free, doc]
+
+          # The directory above the current prefix ("" at the root).
+          - def:
+              name: browse_up
+              body:
+                - decl: [parts, list<string>, { call: [<.prefix.split, "/"] }]
+                - decl: [upper, string, ""]
+                - decl: [idx, i32, 0]
+                - while:
+                    condition: { lt: [idx, { -: [parts.len, 1] }] }
+                    body:
+                      - if: { condition: { gt: [upper.len, 0] }, then: [{ set: [upper, "${upper}/"] }] }
+                      - set: [upper, "${upper}${{ call: [parts.get, idx] }}"]
+                      - set: [idx, { +: [idx, 1] }]
+                - call: [<.browse, upper]
+
+          # GET /api/v1/users (FW-70).
+          - def:
+              name: load_users
+              body:
+                - decl: [text, string, { call: [<.api.call, "GET", "/api/v1/users", ""] }]
+                - call: [<.users.clear]
+                - call: [<.user_roles.clear]
+                - if: { condition: { eq: [{ call: [<.answered, "Users"] }, 0] }, then: [{ return: [] }] }
+                - decl: [doc, ptr<yaml_doc>, { call: [yaml.parse, text] }]
+                - decl: [root, ptr<yaml_node>, { call: [yaml.root, doc] }]
+                - decl: [seq, ref<yaml_node>, { call: [yaml.get, root, "users"] }]
+                - decl: [count, i32, { call: [yaml.size, seq] }]
+                - decl: [idx, i32, 0]
+                - while:
+                    condition: { lt: [idx, count] }
+                    body:
+                      - decl: [item, ref<yaml_node>, { call: [yaml.item, seq, idx] }]
+                      - call: [<.users.push, { call: [yaml.scalar, { call: [yaml.get, item, "name"] }] }]
+                      - decl: [rseq, ref<yaml_node>, { call: [yaml.get, item, "roles"] }]
+                      - decl: [rcount, i32, { call: [yaml.size, rseq] }]
+                      - decl: [ridx, i32, 0]
+                      - decl: [roles, string, ""]
+                      - while:
+                          condition: { lt: [ridx, rcount] }
+                          body:
+                            - if: { condition: { gt: [roles.len, 0] }, then: [{ set: [roles, "${roles},"] }] }
+                            - set: [roles, "${roles}${{ call: [yaml.scalar, { call: [yaml.item, rseq, ridx] }] }}"]
+                            - set: [ridx, { +: [ridx, 1] }]
+                      - call: [<.user_roles.push, roles]
+                      - set: [idx, { +: [idx, 1] }]
+                - call: [yaml.free, doc]
+
+          # POST /api/v1/users with the form; roles are comma separated.
+          - def:
+              name: save_user
+              return: i32
+              body:
+                - decl: [roles, list<string>, { call: [<.form_roles.split, ","] }]
+                - decl: [roles_json, string, ""]
+                - decl: [idx, i32, 0]
+                - while:
+                    condition: { lt: [idx, roles.len] }
+                    body:
+                      - decl: [raw_role, string, { call: [roles.get, idx] }]
+                      - decl: [role, string, { call: [raw_role.trim] }]
+                      - if:
+                          condition: { gt: [role.len, 0] }
+                          then:
+                            - if: { condition: { gt: [roles_json.len, 0] }, then: [{ set: [roles_json, "${roles_json},"] }] }
+                            - decl: [role_json, string, { call: [kontor.text.json_str, role] }]
+                            - set: [roles_json, "${roles_json}${role_json}"]
+                      - set: [idx, { +: [idx, 1] }]
+                - decl: [name_json, string, { call: [kontor.text.json_str, <.form_name] }]
+                - decl: [pass_json, string, { call: [kontor.text.json_str, <.form_password] }]
+                - decl: [body, string, "{\"name\":${name_json},\"password\":${pass_json},\"roles\":[${roles_json}]}"]
+                - decl: [text, string, { call: [<.api.call, "POST", "/api/v1/users", body] }]
+                - if:
+                    condition: { eq: [{ call: [<.answered, "Saving the user"] }, 0] }
+                    then:
+                      - decl: [why, string, { call: [ui_json_field, text, "error"] }]
+                      - if: { condition: { gt: [why.len, 0] }, then: [{ set: [<.message, "Saving the user failed: ${why}"] }] }
+                      - return: [0]
+                - set: [<.message, "User ${<.form_name} saved"]
+                - set: [<.form_password, ""]
+                - call: [<.load_users]
+                - return: [1]
+
+          - def:
+              name: delete_user
+              args: [[name, string]]
+              return: i32
+              body:
+                - decl: [text, string, { call: [<.api.call, "DELETE", "/api/v1/users/${name}", ""] }]
+                - if:
+                    condition: { eq: [{ call: [<.answered, "Deleting ${name}"] }, 0] }
+                    then:
+                      - decl: [why, string, { call: [ui_json_field, text, "error"] }]
+                      - if: { condition: { gt: [why.len, 0] }, then: [{ set: [<.message, "Deleting ${name} failed: ${why}"] }] }
+                      - return: [0]
+                - set: [<.message, "User ${name} deleted"]
+                - call: [<.load_users]
+                - return: [1]
+
+          # Retention: the policy as JSON text, its runs (FW-40, FW-50).
+          - def:
+              name: load_retention
+              body:
+                - decl: [text, string, { call: [<.api.call, "GET", "/api/v1/retention", ""] }]
+                - if: { condition: { eq: [{ call: [<.answered, "Retention"] }, 0] }, then: [{ return: [] }] }
+                - set: [<.policy, text]
+                - call: [<.load_runs]
+
+          - def:
+              name: load_runs
+              body:
+                - decl: [text, string, { call: [<.api.call, "GET", "/api/v1/retention/runs", ""] }]
+                - call: [<.runs.clear]
+                - if: { condition: { eq: [{ call: [<.answered, "Run log"] }, 0] }, then: [{ return: [] }] }
+                - decl: [doc, ptr<yaml_doc>, { call: [yaml.parse, text] }]
+                - decl: [root, ptr<yaml_node>, { call: [yaml.root, doc] }]
+                - decl: [seq, ref<yaml_node>, { call: [yaml.get, root, "runs"] }]
+                - decl: [count, i32, { call: [yaml.size, seq] }]
+                - decl: [idx, i32, 0]
+                - while:
+                    condition: { lt: [idx, count] }
+                    body:
+                      - decl: [item, ref<yaml_node>, { call: [yaml.item, seq, idx] }]
+                      - decl: [run_id, string, { call: [yaml.scalar, { call: [yaml.get, item, "run"] }] }]
+                      - decl: [trigger, string, { call: [yaml.scalar, { call: [yaml.get, item, "trigger"] }] }]
+                      - decl: [deleted, string, { call: [yaml.scalar, { call: [yaml.get, item, "deleted"] }] }]
+                      - call: [<.runs.push, "${run_id}   ${trigger}   ${deleted} deleted"]
+                      - set: [idx, { +: [idx, 1] }]
+                - call: [yaml.free, doc]
+
+          - def:
+              name: save_policy
+              return: i32
+              body:
+                - decl: [text, string, { call: [<.api.call, "PUT", "/api/v1/retention", <.policy] }]
+                - if:
+                    condition: { eq: [{ call: [<.answered, "Saving the policy"] }, 0] }
+                    then:
+                      - decl: [why, string, { call: [ui_json_field, text, "error"] }]
+                      - if: { condition: { gt: [why.len, 0] }, then: [{ set: [<.message, "Saving the policy failed: ${why}"] }] }
+                      - return: [0]
+                - set: [<.message, "Policy saved"]
+                - return: [1]
+
+          # FW-44 with the edited, unsaved document.
+          - def:
+              name: preview_policy
+              return: i32
+              body:
+                - decl: [text, string, { call: [<.api.call, "POST", "/api/v1/retention/preview", <.policy] }]
+                - call: [<.preview.clear]
+                - if:
+                    condition: { eq: [{ call: [<.answered, "Preview"] }, 0] }
+                    then:
+                      - decl: [why, string, { call: [ui_json_field, text, "error"] }]
+                      - if: { condition: { gt: [why.len, 0] }, then: [{ set: [<.message, "Preview failed: ${why}"] }] }
+                      - return: [0]
+                - decl: [doc, ptr<yaml_doc>, { call: [yaml.parse, text] }]
+                - decl: [root, ptr<yaml_node>, { call: [yaml.root, doc] }]
+                - decl: [seq, ref<yaml_node>, { call: [yaml.get, root, "delete"] }]
+                - decl: [count, i32, { call: [yaml.size, seq] }]
+                - decl: [idx, i32, 0]
+                - while:
+                    condition: { lt: [idx, count] }
+                    body:
+                      - decl: [item, ref<yaml_node>, { call: [yaml.item, seq, idx] }]
+                      - decl: [repo, string, { call: [yaml.scalar, { call: [yaml.get, item, "repo"] }] }]
+                      - decl: [name, string, { call: [yaml.scalar, { call: [yaml.get, item, "name"] }] }]
+                      - decl: [version, string, { call: [yaml.scalar, { call: [yaml.get, item, "version"] }] }]
+                      - call: [<.preview.push, "${repo} ${name} ${version}"]
+                      - set: [idx, { +: [idx, 1] }]
+                - decl: [freed_text, string, { call: [yaml.scalar, { call: [yaml.get, root, "bytes"] }] }]
+                - decl: [freed, i64, freed_text]
+                - call: [yaml.free, doc]
+                - set: [<.message, "Preview: ${count} to delete, ${{ call: [ui_bytes, freed] }} freed"]
+                - return: [1]
+
+          - def:
+              name: run_retention
+              return: i32
+              body:
+                - decl: [text, string, { call: [<.api.call, "POST", "/api/v1/retention/run", ""] }]
+                - if: { condition: { eq: [{ call: [<.answered, "Starting the run"] }, 0] }, then: [{ return: [0] }] }
+                - decl: [run_id, string, { call: [ui_json_field, text, "run"] }]
+                - set: [<.message, "Run ${run_id} started"]
+                - call: [<.load_runs]
+                - return: [1]
+
+          - def:
+              name: load_settings
+              body:
+                - decl: [text, string, { call: [<.api.call, "GET", "/api/v1/settings", ""] }]
+                - if: { condition: { eq: [{ call: [<.answered, "Settings"] }, 0] }, then: [{ return: [] }] }
+                - set: [<.settings, text]
+
+          - def:
+              name: save_settings
+              return: i32
+              body:
+                - decl: [text, string, { call: [<.api.call, "PUT", "/api/v1/settings", <.settings] }]
+                - if:
+                    condition: { eq: [{ call: [<.answered, "Saving the settings"] }, 0] }
+                    then:
+                      - decl: [why, string, { call: [ui_json_field, text, "error"] }]
+                      - if: { condition: { gt: [why.len, 0] }, then: [{ set: [<.message, "Saving the settings failed: ${why}"] }] }
+                      - return: [0]
+                - set: [<.message, "Settings saved"]
+                - call: [<.load_settings]
+                - return: [1]
+
+          # Run what the frame asked for (ask), once.
+          - def:
+              name: perform
+              static_off: ["str_cmp"]
+              body:
+                - decl: [what, string, <.todo]
+                - decl: [arg, string, <.todo_arg]
+                - if: { condition: { eq: [what.len, 0] }, then: [{ return: [] }] }
+                - set: [<.todo, ""]
+                - set: [<.todo_arg, ""]
+                - decl: [done, i32, 1]
+                - if: { condition: { eq: [what, "go"] }, then: [{ decl: [target, i32, arg] }, { call: [<.go, target] }] }
+                - if: { condition: { eq: [what, "sign_in"] }, then: [{ set: [done, { call: [<.sign_in] }] }] }
+                - if: { condition: { eq: [what, "sign_out"] }, then: [{ call: [<.sign_out] }] }
+                - if: { condition: { eq: [what, "open_project"] }, then: [{ call: [<.open_project, arg] }] }
+                - if: { condition: { eq: [what, "browse"] }, then: [{ call: [<.browse, arg] }] }
+                - if: { condition: { eq: [what, "browse_up"] }, then: [{ call: [<.browse_up] }] }
+                - if: { condition: { eq: [what, "save_user"] }, then: [{ set: [done, { call: [<.save_user] }] }] }
+                - if: { condition: { eq: [what, "delete_user"] }, then: [{ set: [done, { call: [<.delete_user, arg] }] }] }
+                - if: { condition: { eq: [what, "preview_policy"] }, then: [{ set: [done, { call: [<.preview_policy] }] }] }
+                - if: { condition: { eq: [what, "save_policy"] }, then: [{ set: [done, { call: [<.save_policy] }] }] }
+                - if: { condition: { eq: [what, "run_retention"] }, then: [{ set: [done, { call: [<.run_retention] }] }] }
+                - if: { condition: { eq: [what, "save_settings"] }, then: [{ set: [done, { call: [<.save_settings] }] }] }
+
+          - def:
+              name: signed_in
+              return: i32
+              body:
+                - if: { condition: { gt: [<.api.token.len, 0] }, then: [{ return: [1] }] }
+                - return: [0]
+
+          - def:
+              name: go
+              args: [[target, i32]]
+              body:
+                - set: [<.page, target]
+                - set: [<.message, ""]
+                - if: { condition: { eq: [target, 0] }, then: [{ call: [<.load_overview] }] }
+                - if: { condition: { eq: [target, 1] }, then: [{ call: [<.load_users] }] }
+                - if: { condition: { eq: [target, 2] }, then: [{ call: [<.load_retention] }] }
+                - if: { condition: { eq: [target, 3] }, then: [{ call: [<.load_settings] }] }
+
+      - class: UiView
+        instance: view
+        sees: [store]
+        methods:
+          - def:
+              name: header
+              body:
+                - decl: [cols, buffer<f32>, [0.18, 1.0, 0.3]]
+                - decl: [rows, buffer<f32>, [1.0]]
+                - call: [ui.begin_grid, cols, rows]
+                - call: [ui.set_align, "left", "middle"]
+                - call: [ui.begin_cell, 0, 0, 1, 1]
+                - call: [ui.label, "kontor"]
+                - call: [ui.end_cell]
+                - call: [ui.set_align, "left", "middle"]
+                - call: [ui.begin_cell, 1, 0, 1, 1]
+                - if:
+                    condition: { eq: [{ call: [<.store.can, "read"] }, 1] }
+                    then:
+                      - if: { condition: { eq: [{ call: [ui.button, "Overview"] }, 1] }, then: [{ call: [<.store.ask, "go", "0"] }] }
+                - if:
+                    condition: { eq: [{ call: [<.store.can, "admin"] }, 1] }
+                    then:
+                      - call: [ui.same_line]
+                      - if: { condition: { eq: [{ call: [ui.button, "Users"] }, 1] }, then: [{ call: [<.store.ask, "go", "1"] }] }
+                      - call: [ui.same_line]
+                      - if: { condition: { eq: [{ call: [ui.button, "Retention"] }, 1] }, then: [{ call: [<.store.ask, "go", "2"] }] }
+                      - call: [ui.same_line]
+                      - if: { condition: { eq: [{ call: [ui.button, "Settings"] }, 1] }, then: [{ call: [<.store.ask, "go", "3"] }] }
+                - call: [ui.end_cell]
+                - call: [ui.set_align, "right", "middle"]
+                - call: [ui.begin_cell, 2, 0, 1, 1]
+                - decl: [signed_in, i32, { call: [<.store.signed_in] }]
+                - if:
+                    condition: { eq: [signed_in, 1] }
+                    then:
+                      - call: [ui.label, "${<.store.account}"]
+                      - call: [ui.same_line]
+                      - if: { condition: { eq: [{ call: [ui.button, "Sign out"] }, 1] }, then: [{ call: [<.store.ask, "sign_out", ""] }] }
+                    else:
+                      - if: { condition: { eq: [{ call: [ui.button, "Sign in"] }, 1] }, then: [{ set: [<.store.page, 4] }] }
+                - call: [ui.end_cell]
+                - call: [ui.end_grid]
+
+          - def:
+              name: login_page
+              body:
+                - decl: [cols, buffer<f32>, [1.0, 0.36, 1.0]]
+                - decl: [rows, buffer<f32>, [0.2, 1.0]]
+                - call: [ui.begin_grid, cols, rows]
+                - call: [ui.begin_cell, 1, 1, 1, 1]
+                - call: [ui.label, "Sign in to kontor"]
+                - call: [ui.spacer, 8.0]
+                - call: [ui.label, "User"]
+                - set: [<.store.login_name, { call: [ui.text_input, "login_name", <.store.login_name] }]
+                - call: [ui.label, "Password"]
+                - set: [<.store.login_password, { call: [ui.password_input, "login_password", <.store.login_password] }]
+                - call: [ui.spacer, 8.0]
+                - decl: [submit, i32, { call: [ui.button, "Sign in"] }]
+                - if: { condition: { eq: [{ call: [input.key_pressed, "enter"] }, 1] }, then: [{ set: [submit, 1] }] }
+                - if: { condition: { eq: [submit, 1] }, then: [{ call: [<.store.ask, "sign_in", ""] }] }
+                - call: [ui.end_cell]
+                - call: [ui.end_grid]
+
+          - def:
+              name: overview_page
+              body:
+                - decl: [cols, buffer<f32>, [0.35, 1.0]]
+                - decl: [rows, buffer<f32>, [1.0]]
+                - call: [ui.set_gap, 16.0, 8.0]
+                - call: [ui.begin_grid, cols, rows]
+                - call: [ui.set_scroll, "y"]
+                - call: [ui.begin_cell, 0, 0, 1, 1]
+                - call: [ui.label, "${<.store.totals}"]
+                - call: [ui.separator]
+                - call: [ui.label, "exodus projects"]
+                - decl: [idx, i32, 0]
+                - while:
+                    condition: { lt: [idx, <.store.projects.len] }
+                    body:
+                      - decl: [name, string, { call: [<.store.projects.get, idx] }]
+                      - if: { condition: { eq: [{ call: [ui.button, name] }, 1] }, then: [{ call: [<.store.ask, "open_project", name] }] }
+                      - set: [idx, { +: [idx, 1] }]
+                - call: [ui.separator]
+                - if: { condition: { eq: [{ call: [ui.button, "Generic files"] }, 1] }, then: [{ call: [<.store.ask, "browse", ""] }] }
+                - call: [ui.end_cell]
+                - call: [ui.set_scroll, "y"]
+                - call: [ui.begin_cell, 1, 0, 1, 1]
+                - if:
+                    condition: { eq: [<.store.browsing, 1] }
+                    then:
+                      - call: [<.generic_list]
+                    else:
+                      - call: [<.project_detail]
+                - call: [ui.end_cell]
+                - call: [ui.end_grid]
+
+          - def:
+              name: project_detail
+              body:
+                - if:
+                    condition: { eq: [<.store.project.len, 0] }
+                    then:
+                      - call: [ui.label, "Pick a project on the left."]
+                      - return: []
+                - call: [ui.label, "${<.store.project}"]
+                - if:
+                    condition: { gt: [<.store.install.len, 0] }
+                    then:
+                      - call: [ui.label, "${<.store.install}"]
+                      - if: { condition: { eq: [{ call: [ui.button, "Copy install command"] }, 1] }, then: [{ call: [input.clipboard_set, <.store.install] }] }
+                - call: [ui.separator]
+                - decl: [idx, i32, 0]
+                - while:
+                    condition: { lt: [idx, <.store.versions.len] }
+                    body:
+                      - call: [ui.label, { call: [<.store.versions.get, idx] }]
+                      - set: [idx, { +: [idx, 1] }]
+
+          - def:
+              name: generic_list
+              body:
+                - call: [ui.label, "generic/${<.store.prefix}"]
+                - if:
+                    condition: { gt: [<.store.prefix.len, 0] }
+                    then:
+                      - if: { condition: { eq: [{ call: [ui.button, ".."] }, 1] }, then: [{ call: [<.store.ask, "browse_up", ""] }] }
+                - decl: [didx, i32, 0]
+                - while:
+                    condition: { lt: [didx, <.store.dirs.len] }
+                    body:
+                      - decl: [dir, string, { call: [<.store.dirs.get, didx] }]
+                      - if: { condition: { eq: [{ call: [ui.button, "${dir}/"] }, 1] }, then: [{ call: [<.store.ask, "browse", dir] }] }
+                      - set: [didx, { +: [didx, 1] }]
+                - decl: [fidx, i32, 0]
+                - while:
+                    condition: { lt: [fidx, <.store.files.len] }
+                    body:
+                      - call: [ui.label, { call: [<.store.files.get, fidx] }]
+                      - set: [fidx, { +: [fidx, 1] }]
+
+          - def:
+              name: users_page
+              body:
+                - decl: [cols, buffer<f32>, [1.0, 0.4]]
+                - decl: [rows, buffer<f32>, [1.0]]
+                - call: [ui.set_gap, 16.0, 8.0]
+                - call: [ui.begin_grid, cols, rows]
+                - call: [ui.set_scroll, "y"]
+                - call: [ui.begin_cell, 0, 0, 1, 1]
+                - decl: [idx, i32, 0]
+                - while:
+                    condition: { lt: [idx, <.store.users.len] }
+                    body:
+                      - decl: [name, string, { call: [<.store.users.get, idx] }]
+                      - call: [ui.label, "${name}   ${{ call: [<.store.user_roles.get, idx] }}"]
+                      - call: [ui.same_line]
+                      - if: { condition: { eq: [{ call: [ui.button, "Edit ${name}"] }, 1] }, then: [{ set: [<.store.form_name, name] }, { set: [<.store.form_roles, { call: [<.store.user_roles.get, idx] }] }] }
+                      - call: [ui.same_line]
+                      - if: { condition: { eq: [{ call: [ui.button, "Delete ${name}"] }, 1] }, then: [{ call: [<.store.ask, "delete_user", name] }] }
+                      - set: [idx, { +: [idx, 1] }]
+                - call: [ui.end_cell]
+                - call: [ui.begin_cell, 1, 0, 1, 1]
+                - call: [ui.label, "New or changed user"]
+                - call: [ui.label, "Name"]
+                - set: [<.store.form_name, { call: [ui.text_input, "form_name", <.store.form_name] }]
+                - call: [ui.label, "Password"]
+                - set: [<.store.form_password, { call: [ui.password_input, "form_password", <.store.form_password] }]
+                - call: [ui.label, "Roles (comma separated)"]
+                - set: [<.store.form_roles, { call: [ui.text_input, "form_roles", <.store.form_roles] }]
+                - if: { condition: { eq: [{ call: [ui.button, "Save user"] }, 1] }, then: [{ call: [<.store.ask, "save_user", ""] }] }
+                - call: [ui.end_cell]
+                - call: [ui.end_grid]
+
+          - def:
+              name: retention_page
+              body:
+                - decl: [cols, buffer<f32>, [1.0, 0.4]]
+                - decl: [rows, buffer<f32>, [1.0]]
+                - call: [ui.set_gap, 16.0, 8.0]
+                - call: [ui.begin_grid, cols, rows]
+                - call: [ui.begin_cell, 0, 0, 1, 1]
+                - call: [ui.label, "Policy (JSON or YAML)"]
+                - set: [<.store.policy, { call: [ui.text_area, "policy", <.store.policy] }]
+                - if: { condition: { eq: [{ call: [ui.button, "Preview"] }, 1] }, then: [{ call: [<.store.ask, "preview_policy", ""] }] }
+                - call: [ui.same_line]
+                - if: { condition: { eq: [{ call: [ui.button, "Save"] }, 1] }, then: [{ call: [<.store.ask, "save_policy", ""] }] }
+                - call: [ui.same_line]
+                - if: { condition: { eq: [{ call: [ui.button, "Run now"] }, 1] }, then: [{ call: [<.store.ask, "run_retention", ""] }] }
+                - call: [ui.end_cell]
+                - call: [ui.set_scroll, "y"]
+                - call: [ui.begin_cell, 1, 0, 1, 1]
+                - call: [ui.label, "Would delete"]
+                - decl: [pidx, i32, 0]
+                - while:
+                    condition: { lt: [pidx, <.store.preview.len] }
+                    body:
+                      - call: [ui.label, { call: [<.store.preview.get, pidx] }]
+                      - set: [pidx, { +: [pidx, 1] }]
+                - call: [ui.separator]
+                - call: [ui.label, "Runs"]
+                - decl: [ridx, i32, 0]
+                - while:
+                    condition: { lt: [ridx, <.store.runs.len] }
+                    body:
+                      - call: [ui.label, { call: [<.store.runs.get, ridx] }]
+                      - set: [ridx, { +: [ridx, 1] }]
+                - call: [ui.end_cell]
+                - call: [ui.end_grid]
+
+          - def:
+              name: settings_page
+              body:
+                - decl: [cols, buffer<f32>, [1.0]]
+                - decl: [rows, buffer<f32>, [1.0]]
+                - call: [ui.begin_grid, cols, rows]
+                - call: [ui.begin_cell, 0, 0, 1, 1]
+                - call: [ui.label, "Settings (JSON; keys here override kontor.yaml)"]
+                - set: [<.store.settings, { call: [ui.text_area, "settings", <.store.settings] }]
+                - if: { condition: { eq: [{ call: [ui.button, "Save settings"] }, 1] }, then: [{ call: [<.store.ask, "save_settings", ""] }] }
+                - call: [ui.end_cell]
+                - call: [ui.end_grid]
+
+          # One frame of the whole page.
+          - def:
+              name: frame
+              body:
+                - decl: [mouse_x, f32, { call: [input.mouse_pos_x] }]
+                - decl: [mouse_y, f32, { call: [input.mouse_pos_y] }]
+                - call: [engine.update_hover, mouse_x, mouse_y]
+                - decl: [mbtn, i32, { call: [input.mouse_button, 0] }]
+                - decl: [mrel, i32, { call: [input.mouse_released, 0] }]
+                - call: [engine.update_drag, mouse_x, mouse_y, mbtn, mrel]
+                - decl: [fb_size, ivec2, { call: [engine.framebuffer_size, <.win] }]
+                - decl: [fb_w, i32, fb_size.x]
+                - decl: [fb_h, i32, fb_size.y]
+                - if: { condition: { and: [{ gt: [fb_w, 0] }, { gt: [fb_h, 0] }] }, then: [{ call: [gl.viewport, 0, 0, fb_w, fb_h] }] }
+                - call: [gl.clear_all, 0.97, 0.97, 0.98, 1.0]
+                - call: [ui.begin, <.win]
+                - decl: [cols, buffer<f32>, [1.0]]
+                - decl: [rows, buffer<f32>, [0.07, 1.0, 0.05]]
+                - call: [ui.set_gap, 0.0, 6.0]
+                - call: [ui.begin_grid, cols, rows]
+                - call: [ui.begin_cell, 0, 0, 1, 1]
+                - call: [<.header]
+                - call: [ui.end_cell]
+                - call: [ui.begin_cell, 0, 1, 1, 1]
+                - decl: [page, i32, <.store.page]
+                - if: { condition: { eq: [page, 0] }, then: [{ call: [<.overview_page] }] }
+                - if: { condition: { eq: [page, 1] }, then: [{ call: [<.users_page] }] }
+                - if: { condition: { eq: [page, 2] }, then: [{ call: [<.retention_page] }] }
+                - if: { condition: { eq: [page, 3] }, then: [{ call: [<.settings_page] }] }
+                - if: { condition: { eq: [page, 4] }, then: [{ call: [<.login_page] }] }
+                - call: [ui.end_cell]
+                - call: [ui.set_align, "left", "middle"]
+                - call: [ui.begin_cell, 0, 2, 1, 1]
+                - call: [ui.label, "${<.store.message}"]
+                - call: [ui.end_cell]
+                - call: [ui.end_grid]
+                - call: [ui.end]
+
+          # The browser loop (no engine.run: its callbacks are free functions
+          # and would need a global anchor).  On wasm32 the sleep yields to the
+          # browser (Asyncify), natively engine.swap paces the frame.
+          - def:
+              name: run
+              return: i32
+              body:
+                - set: [<.win, { call: [engine.create_window, 1280, 800, "kontor"] }]
+                - if: { condition: { eq: [<.win, null] }, then: [{ return: [1] }] }
+                - call: [gl.init]
+                - call: [gl.enable_blend]
+                - call: [ui.init]
+                - call: [input.init, <.win]
+                - decl: [font, ui_font, { call: [ui.load_font_default, 16.0] }]
+                - if: { condition: { neq: [font, null] }, then: [{ call: [ui.set_default_font, font] }] }
+                - call: [<.store.start]
+                - decl: [web, i32, 0]
+                - if: { condition: { eq: [{ call: [engine.is_web] }, 1] }, then: [{ set: [web, 1] }] }
+                - while:
+                    condition: { eq: [{ call: [engine.running, <.win] }, 1] }
+                    body:
+                      - call: [<.frame]
+                      - call: [engine.swap, <.win]
+                      # Requests run between frames, never inside one
+                      # (aiml doc/wasm_frame_loop.md: a yield mid-frame
+                      # would show a half-drawn canvas).
+                      - call: [<.store.perform]
+                      - if: { condition: { eq: [web, 1] }, then: [{ call: [time.sleep_ms, 16] }] }
+                - return: [0]

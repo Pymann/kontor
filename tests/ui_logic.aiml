@@ -1,0 +1,162 @@
+# FW-102: the UI's state and API layer (ui/kontor_ui.aiml, instances `api`
+# and `store`) driven natively against a running kontor, without a browser.
+# tests/ui_logic.sh starts kontor, makes the admin "ops", publishes lib-a and
+# runs this with the base URL as argument.
+#
+#   aiml tests/ui_logic.aiml -- http://127.0.0.1:18097
+
+- import: "../ui/kontor_ui.aiml"
+
+- class:
+    name: Tally
+    members:
+      - [fails, i32, 0, { access: public }]
+    methods:
+      - def:
+          name: check
+          args: [[what, string], [got, string], [want, string]]
+          body:
+            - if:
+                condition: { eq: [got, want] }
+                then:
+                  - print: ["  ok   ${what}"]
+                else:
+                  - print: ["  FAIL ${what}: got '${got}' want '${want}'"]
+                  - set: [<.fails, { +: [<.fails, 1] }]
+
+- def:
+    name: main
+    return: i32
+    body:
+      - decl: [given, string, { call: [sys.get_arg, 1] }]
+      - if: { condition: { or: [{ eq: [given, null] }, { eq: [given.len, 0] }] }, then: [{ set: [given, "http://127.0.0.1:18097"] }] }
+      - decl: [tally, ptr<Tally>, { new: Tally }]
+      - decl: [app, ptr<KontorUi>, { new: KontorUi }]
+      - set: [app.api.base, given]
+      - decl: [store, ref<KontorUi_store>, app.store]
+
+      - print: ["start without a session"]
+      - call: [store.start]
+      # kontor's default: anonymous requests read (auth.anonymous: reader)
+      - call: [tally.check, "anonymous reader sees the overview", "${store.page}", "0"]
+      - call: [tally.check, "anonymous rights", store.rights, ",read,"]
+      - call: [tally.check, "no session", "${{ call: [store.signed_in] }}", "0"]
+
+      - print: ["sign in (FW-20)"]
+      - set: [store.login_name, "ops"]
+      - set: [store.login_password, "wrong-password"]
+      - call: [store.ask, "sign_in", ""]
+      - call: [store.perform]
+      - call: [tally.check, "wrong password stays out", "${{ call: [store.signed_in] }}", "0"]
+      - call: [tally.check, "says so", store.message, "Sign-in failed"]
+      - set: [store.login_password, "ops-password-1"]
+      - call: [store.ask, "sign_in", ""]
+      - call: [store.perform]
+      - decl: [hit_1, i32, { call: [store.signed_in] }]
+      - call: [tally.check, "signed in", "${hit_1}", "1"]
+      - call: [tally.check, "password forgotten", store.login_password, ""]
+      - call: [tally.check, "who", store.account, "ops"]
+      - call: [tally.check, "rights (FW-25)", store.rights, ",read,write,delete,admin,webhook_admin,"]
+      - call: [tally.check, "session kept for the tab", { call: [storage.session_get, "kontor.session"] }, "${app.api.token_id}:${app.api.token}"]
+      - call: [tally.check, "overview page", "${store.page}", "0"]
+      - call: [tally.check, "ask ran once", store.todo, ""]
+
+      - print: ["overview (FW-30, FW-31)"]
+      - call: [tally.check, "projects", "${store.projects.len}", "1"]
+      - call: [tally.check, "lib-a listed", { call: [store.projects.get, 0] }, "lib-a"]
+      - call: [store.ask, "open_project", "lib-a"]
+      - call: [store.perform]
+      - call: [tally.check, "two versions", "${store.versions.len}", "2"]
+      - decl: [newest, string, { call: [store.versions.get, 0] }]
+      - decl: [hit_2, i32, { call: [newest.starts_with, "1.10.0"] }]
+      - call: [tally.check, "newest first", "${hit_2}", "1"]
+      - decl: [hit_3, i32, { call: [store.install.contains, "lib-a"] }]
+      - call: [tally.check, "install command", "${hit_3}", "1"]
+
+      - print: ["generic files (listing.md FL-01)"]
+      - call: [store.ask, "browse", ""]
+      - call: [store.perform]
+      - call: [tally.check, "root dirs", "${store.dirs.len}", "1"]
+      - call: [tally.check, "dir ci", { call: [store.dirs.get, 0] }, "ci"]
+      - call: [store.ask, "browse", "ci"]
+      - call: [store.perform]
+      - call: [tally.check, "one file in ci", "${store.files.len}", "1"]
+      - decl: [first_file, string, { call: [store.files.get, 0] }]
+      - decl: [hit_4, i32, { call: [first_file.starts_with, "ci/a.txt"] }]
+      - call: [tally.check, "its path", "${hit_4}", "1"]
+      - call: [store.ask, "browse_up", ""]
+      - call: [store.perform]
+      - call: [tally.check, "back at the root", store.prefix, ""]
+
+      - print: ["users (FW-70)"]
+      - call: [store.ask, "go", "1"]
+      - call: [store.perform]
+      - call: [tally.check, "users page", "${store.page}", "1"]
+      - decl: [before, i32, store.users.len]
+      - set: [store.form_name, "vera"]
+      - set: [store.form_password, "vera-password-1"]
+      - set: [store.form_roles, "reader, writer"]
+      - call: [store.ask, "save_user", ""]
+      - call: [store.perform]
+      - call: [tally.check, "saved", store.message, "User vera saved"]
+      - decl: [after, i32, { +: [before, 1] }]
+      - call: [tally.check, "one more user", "${store.users.len}", "${after}"]
+      - decl: [vera_idx, i32, -1]
+      - decl: [uidx, i32, 0]
+      - while:
+          condition: { lt: [uidx, store.users.len] }
+          body:
+            - if: { condition: { eq: [{ call: [store.users.get, uidx] }, "vera"] }, then: [{ set: [vera_idx, uidx] }] }
+            - set: [uidx, { +: [uidx, 1] }]
+      - decl: [listed, string, "no"]
+      - if: { condition: { ge: [vera_idx, 0] }, then: [{ set: [listed, "yes"] }] }
+      - call: [tally.check, "vera listed", listed, "yes"]
+      - if: { condition: { lt: [vera_idx, 0] }, then: [{ set: [vera_idx, 0] }] }
+      - call: [tally.check, "vera's roles", { call: [store.user_roles.get, vera_idx] }, "reader,writer"]
+      - call: [store.ask, "delete_user", "vera"]
+      - call: [store.perform]
+      - call: [tally.check, "deleted", store.message, "User vera deleted"]
+      - call: [tally.check, "back to before", "${store.users.len}", "${before}"]
+
+      - print: ["retention (FW-44)"]
+      - call: [store.ask, "go", "2"]
+      - call: [store.perform]
+      - set: [store.policy, "schedule: \"\"\nrules:\n  - repo: exodus\n    match: \"lib-*\"\n    keep_last: 1\n"]
+      - call: [store.ask, "preview_policy", ""]
+      - call: [store.perform]
+      - call: [tally.check, "would delete the older version", "${store.preview.len}", "1"]
+      - call: [tally.check, "which", { call: [store.preview.get, 0] }, "exodus lib-a 1.0.0"]
+      - set: [store.policy, "rules:\n  - repo: exodus\n    match: \"*\"\n"]
+      - call: [store.ask, "preview_policy", ""]
+      - call: [store.perform]
+      - decl: [hit_5, i32, { call: [store.message.starts_with, "Preview failed"] }]
+      - call: [tally.check, "a rule without a limit is refused", "${hit_5}", "1"]
+
+      - print: ["sign out (FW-23)"]
+      - decl: [old_token, string, app.api.token]
+      - call: [store.ask, "sign_out", ""]
+      - call: [store.perform]
+      - call: [tally.check, "signed out", "${{ call: [store.signed_in] }}", "0"]
+      - call: [tally.check, "back to the anonymous overview", "${store.page}", "0"]
+      - call: [tally.check, "reader rights again", store.rights, ",read,"]
+      - decl: [kept, string, { call: [storage.session_get, "kontor.session"] }]
+      - if: { condition: { eq: [kept, null] }, then: [{ set: [kept, ""] }] }
+      - call: [tally.check, "tab forgot the session", kept, ""]
+      - set: [app.api.token, old_token]
+      - decl: [gone, string, { call: [app.api.call, "GET", "/api/v1/whoami", ""] }]
+      - call: [tally.check, "the token is revoked", "${app.api.status}", "401"]
+
+      - print: ["a session that ends while in use"]
+      # the revoked token is still set, as in a tab whose session expired
+      - call: [store.ask, "go", "0"]
+      - call: [store.perform]
+      - call: [tally.check, "401 -> login page", "${store.page}", "4"]
+      - call: [tally.check, "says why", store.message, "Your session has ended"]
+
+      - if:
+          condition: { gt: [tally.fails, 0] }
+          then:
+            - print: ["FAIL ui_logic: ${tally.fails} failed"]
+            - return: [1]
+      - print: ["PASS ui_logic"]
+      - return: [0]

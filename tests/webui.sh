@@ -91,6 +91,8 @@ check "login rita" "$(anon -u rita:rita-password-1 -X POST "$BASE/api/v1/session
 check "session fields" "$(json "$WORK/body" "(j['owner'], j['roles'], len(j['token']), j['expires_ms'] > 0)")" "('rita', ['reader'], 64, True)"
 RITA=$(json "$WORK/body" "j['token']"); RITA_ID=$(json "$WORK/body" "j['id']")
 check "session expires in 12 h" "$(json "$WORK/body" "abs(j['expires_ms'] - __import__('time').time()*1000 - 12*3600*1000) < 120000")" "True"
+check "whoami lists rights (FW-25)" "$(status "$BASE/api/v1/whoami" > /dev/null; json "$WORK/body" "j['rights']")" "['read', 'write', 'delete', 'admin', 'webhook_admin']"
+check "anonymous reader rights" "$(anon "$BASE/api/v1/whoami" > /dev/null; json "$WORK/body" "j['rights']")" "['read']"
 check "session works as bearer" "$(bearer "$RITA" "$BASE/api/v1/whoami" > /dev/null; json "$WORK/body" "(j['name'], j['kind'])")" "('rita', 'token')"
 check "wrong password -> 401" "$(anon -u rita:wrong-password -X POST "$BASE/api/v1/sessions")" "401"
 MSG_WRONG=$(json "$WORK/body" "j['error']")
