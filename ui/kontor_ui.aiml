@@ -100,7 +100,8 @@
             - return: [1]
 
       # FW-21/FW-22: a session the SSO handed over in the fragment
-      # (#token=<id>:<secret>), else the one this tab kept.  1 when found.
+      # (#token=<id>:<secret>; storage.hash gives it without the "#"), else
+      # the one this tab kept.  1 when found.
       - def:
           name: restore
           return: i32
@@ -108,9 +109,9 @@
             - decl: [frag, string, { call: [storage.hash] }]
             - decl: [kept, string, ""]
             - if:
-                condition: { eq: [{ call: [frag.starts_with, "#token="] }, 1] }
+                condition: { eq: [{ call: [frag.starts_with, "token="] }, 1] }
                 then:
-                  - set: [kept, { call: [frag.substr, 7] }]
+                  - set: [kept, { call: [frag.substr, 6] }]
                   - call: [storage.set_hash, ""]
                 else:
                   - set: [kept, { call: [storage.session_get, "kontor.session"] }]

@@ -61,6 +61,16 @@
       - call: [tally.check, "overview page", "${store.page}", "0"]
       - call: [tally.check, "ask ran once", store.todo, ""]
 
+      - print: ["a session handed over in the fragment (FW-21)"]
+      - decl: [handed, ptr<KontorUi>, { new: KontorUi }]
+      - set: [handed.api.base, given]
+      - call: [storage.session_remove, "kontor.session"]
+      - call: [storage.set_hash, "token=${app.api.token_id}:${app.api.token}"]
+      - call: [handed.store.start]
+      - call: [tally.check, "signed in from the fragment", handed.store.account, "ops"]
+      - call: [tally.check, "fragment removed", { call: [storage.hash] }, ""]
+      - call: [tally.check, "kept for the tab", { call: [storage.session_get, "kontor.session"] }, "${app.api.token_id}:${app.api.token}"]
+
       - print: ["overview (FW-30, FW-31)"]
       - call: [tally.check, "projects", "${store.projects.len}", "1"]
       - call: [tally.check, "lib-a listed", { call: [store.projects.get, 0] }, "lib-a"]
