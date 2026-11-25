@@ -276,20 +276,25 @@ an aiml program, `ui/kontor_ui.aiml`, drawn with aiml's UI widgets
 
 It needs from aiml (tracked there, spec first):
 
-- **FW-90** `http.fetch(method, url, headers: map<string,string>, body: string)`
-  → `{status: i32, body: string, headers}` on wasm32 (`window.fetch`) and
-  natively (http client) — today only `http.fetch_text` (GET, body only)
-  exists (spec/32_2).
-- **FW-91** A masked mode for `ui.text_input` (password fields), and
-  clipboard write for copy buttons on wasm32.
+- **FW-90** `http.fetch(method, url, headers, body) → string` plus
+  `http.fetch_status() → i32`: `headers` is "Name: value" lines, the body
+  comes back whatever the status, the status is 0 when nothing answered;
+  `window.fetch` on wasm32, the http client natively (aiml spec/32_2
+  F32-2-60…65).
+- **FW-91** `ui.password_input` (draws one bullet per character, returns the
+  real text) and `ui.password_mask` (aiml spec/44_3 F44-3-20/21); copy
+  buttons use the existing `input.clipboard_set`.
 - **FW-92** The aiml release carries the wasm32 runtime (`libaiml_wasm.a`)
   and names the emsdk version it was built with, so kontor's CI builds the
   UI out of the aiml release like it builds the binary.
+- **FW-93** `storage.session_get/session_set/session_remove` (sessionStorage)
+  and `storage.hash/set_hash` (the URL fragment, set without a history
+  entry) for FW-21, FW-22 (aiml spec/23_2).
 - **FW-94** The HTTP runtime's file responses answer a matching
-  `If-None-Match` with `304` (today they send the `ETag` but always `200`),
-  for FW-13.
-- **FW-93** Browser hooks for `sessionStorage` get/set and reading/clearing
-  the URL fragment (FW-21, FW-22).
+  `If-None-Match` (`*`, a list, or a weak tag) with `304` and no body, for
+  FW-13 (aiml spec/32_2 F32-2-66).
+
+FW-90, FW-91, FW-93 and FW-94 are implemented in aiml PR #5; FW-92 is open.
 
 ## 9. Tests
 
