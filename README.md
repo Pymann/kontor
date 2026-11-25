@@ -66,7 +66,8 @@ KONTOR_TOKEN=… aiml venv /other/venv install kontor --kontor https://kontor.ex
 
 `publish` sends the committed, git-tracked sources as a reproducible archive;
 a version that kontor has is not replaced (`409`), so raise `version` in
-`aiml.tool.json` for the next one.  A private CA goes to the client as
+`aiml.tool.json` for the next one.  Only a caller with the `admin` right may
+overwrite a published version or write a deleted one again.  A private CA goes to the client as
 `AIML_WSS_CA=<ca.crt>`.
 
 ## API
@@ -100,6 +101,17 @@ exists under `/api/v1/…`; `/generic/…` and `/exodus/…` have `/api/v1/` ali
 | GET | `/api/v1/layers/<pipeline>` | read | Runs of a cosmos pipeline: tags of `cosmos-layers/<pipeline>`. |
 | GET | `/api/v1/layers/<pipeline>/<run>` | read | Stages of one run: name, bindings, reuse, step key, agent, digest, size, media type. |
 | * | `/v2/…` | read/write/delete | OCI Distribution v1.1 registry, see [Registry](#registry). |
+| GET | `/`, `/ui/…` | – | The web UI (`--ui-dir`, `$KONTOR_UI_DIR`), see [doc/spec/web_ui.md](doc/spec/web_ui.md). |
+| POST | `/api/v1/sessions` | Basic login | Session token for the UI `{id, owner, roles, token, expires_ms}` (`auth.session_hours`, default 12). |
+| GET | `/api/v1/catalog` | read | What kontor holds: projects, generic files, OCI repositories, layer runs. |
+| GET | `/api/v1/catalog/exodus/<name>` | read | Versions with publisher, time, size, protection, dependents, install command. |
+| GET | `/api/v1/catalog/generic?prefix=<p>` | read | Directory listing of generic files. |
+| GET/PUT | `/api/v1/retention` | admin | Retention policy (opt-in; `data/config/retention.yaml`). |
+| POST | `/api/v1/retention/preview` | admin | What the stored (or the posted) policy would delete. |
+| POST | `/api/v1/retention/run` | admin | Run it now; `GET /api/v1/retention/runs` is the log. |
+| GET/PUT/DELETE | `/api/v1/protected?repo=&name=&version=` | admin | Objects retention never deletes. |
+| DELETE | `/exodus/<name>/<version>` | delete | Delete a version (leaves a tombstone; newest, dependencies and protected ones are kept). |
+| GET/PUT | `/api/v1/settings` | admin | Anonymous role, public URL, session hours, custom roles; overrides `kontor.yaml`. |
 
 ### Auth
 

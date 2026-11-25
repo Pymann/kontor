@@ -69,7 +69,11 @@ check "wasm type" "$(header content-type)" "application/wasm"
 cmp -s "$UI/kontor-ui.wasm" "$WORK/w.wasm" && pass "wasm bytes identical" || fail "wasm bytes differ"
 ETAG="$(header etag)"
 check "etag present" "$([ -n "$ETAG" ] && echo yes)" "yes"
-check "if-none-match -> 304" "$(anon -H "If-None-Match: $ETAG" "$BASE/ui/kontor-ui.wasm")" "304"
+# If-None-Match → 304 is the HTTP runtime's part (aiml, web_ui.md FW-94);
+# checked here once the aiml in use does it.
+if [ "${KONTOR_EXPECT_304:-0}" = 1 ]; then
+    check "if-none-match -> 304" "$(anon -H "If-None-Match: $ETAG" "$BASE/ui/kontor-ui.wasm")" "304"
+fi
 check "nested file" "$(anon "$BASE/ui/assets/app.css")" "200"
 check "css type" "$(header content-type | cut -d';' -f1)" "text/css"
 check "ui ignores a bad credential" "$(anon -H 'Authorization: Bearer 00ff' "$BASE/ui/")" "200"

@@ -455,6 +455,24 @@
             - call: [g_lock.release]
 
 - def:
+    name: on_settings_get
+    args: [[req, http_request_handle], [resp, http_response_handle]]
+    body:
+      - call: [g_lock.acquire]
+      - decl: [xch, ptr<kontor.http.Exchange>, { call: [wrap, req, resp] }]
+      - call: [g_api.settings_get, xch]
+      - call: [g_lock.release]
+
+- def:
+    name: on_settings_put
+    args: [[req, http_request_handle], [resp, http_response_handle]]
+    body:
+      - call: [g_lock.acquire]
+      - decl: [xch, ptr<kontor.http.Exchange>, { call: [wrap, req, resp] }]
+      - call: [g_api.settings_put, xch]
+      - call: [g_lock.release]
+
+- def:
     name: on_not_found
     args: [[req, http_request_handle], [resp, http_response_handle]]
     body:
@@ -691,6 +709,8 @@
       - call: [srv.route, "DELETE", "/api/v1/protected", on_protected_delete]
       - call: [srv.route, "DELETE", "/exodus/:name/:version", on_exodus_delete]
       - call: [srv.route, "DELETE", "/api/v1/exodus/:name/:version", on_exodus_delete]
+      - call: [srv.route, "GET", "/api/v1/settings", on_settings_get]
+      - call: [srv.route, "PUT", "/api/v1/settings", on_settings_put]
       - call: [srv.route, "POST", "/api/v1/sessions", on_session_create]
       - call: [srv.route, "GET", "/", on_ui]
       - call: [srv.route, "GET", "/ui", on_ui]

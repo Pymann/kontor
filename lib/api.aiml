@@ -17,6 +17,7 @@
 - import: "webui.aiml"
 - import: "catalog.aiml"
 - import: "housekeeping.aiml"
+- import: "settings.aiml"
 - import: "auth.aiml"
 - import: "oci.aiml"
 - import: "hooks.aiml"
@@ -40,6 +41,7 @@
       - [catalog, ptr<kontor.catalog.Catalog>, null, { access: public }]
       - [house, ptr<kontor.housekeeping.Housekeeping>, null, { access: public }]
       - [public_url, string, "", { access: public }]
+      - [settings, ptr<kontor.settings.Settings>, null, { access: public }]
     methods:
       # The UI directory: the first of `candidates` that exists (FW-11).
       - def:
@@ -91,6 +93,18 @@
             - decl: [house_new, ptr<kontor.housekeeping.Housekeeping>, { new: kontor.housekeeping.Housekeeping }]
             - set: [house_new.data_dir, data_dir]
             - set: [<.house, house_new]
+            - decl: [set_new, ptr<kontor.settings.Settings>, { new: kontor.settings.Settings }]
+            - set: [set_new.data_dir, data_dir]
+            - call: [set_new.load]
+            - decl: [no_roles, list<string>, []]
+            - decl: [acl_now, ref<kontor.auth.AccessControl>, <.acl]
+            - call: [set_new.apply, acl_now, no_roles]
+            - if:
+                condition: { gt: [set_new.public_url.len, 0] }
+                then:
+                  - set: [<.public_url, set_new.public_url]
+                  - set: [<.hooks.public_url, set_new.public_url]
+            - set: [<.settings, set_new]
             - call: [<.reload_graph]
             - if:
                 condition: { eq: [loaded, 0] }
@@ -715,6 +729,11 @@
             - decl: [password, string, { call: [yaml.scalar, { call: [yaml.get, root, "password"] }] }]
             - decl: [roles_csv, string, { call: [<.body_csv, root, "roles"] }]
             - call: [yaml.free, doc]
+            - if:
+                condition: { and: [{ eq: [{ call: [<.is_admin_user, name] }, 1] }, { eq: [{ call: [<.acl.allows, roles_csv, "admin"] }, 0] }, { eq: [{ call: [<.other_admins, name] }, 0] }] }
+                then:
+                  - call: [xch.error, 409, "${name} is the last user with the admin right"]
+                  - return: []
             - decl: [problem, string, { call: [<.acl.put_user, name, password, roles_csv] }]
             - if:
                 condition: { gt: [problem.len, 0] }
@@ -738,8 +757,14 @@
           body:
             - decl: [who, kontor.auth.Principal, { call: [<.authorize, xch, "admin"] }]
             - if: { condition: { eq: [who.valid, 0] }, then: [{ return: [] }] }
+            - decl: [target, string, { call: [xch.param, "name"] }]
             - if:
-                condition: { eq: [{ call: [<.acl.delete_user, { call: [xch.param, "name"] }] }, 0] }
+                condition: { and: [{ eq: [{ call: [<.is_admin_user, target] }, 1] }, { eq: [{ call: [<.other_admins, target] }, 0] }] }
+                then:
+                  - call: [xch.error, 409, "${target} is the last user with the admin right"]
+                  - return: []
+            - if:
+                condition: { eq: [{ call: [<.acl.delete_user, target] }, 0] }
                 then:
                   - call: [xch.error, 404, "no such user"]
                   - return: []
@@ -1025,6 +1050,80 @@
             - call: [<.hooks.emit, "artifact.deleted", "{\"repo\":\"exodus\",\"name\":${{ call: [kontor.text.json_str, name] }},\"version\":${{ call: [kontor.text.json_str, version] }},\"reason\":\"manual\"}"]
             - call: [log.info, "exodus ${name}@${version} deleted by ${who.name}"]
             - call: [xch.empty, 204]
+
+      # ── settings (web_ui.md §6) ──────────────────────────────────────────
+
+      # 1 when local user `name` exists and has the admin right.
+      - def:
+          name: is_admin_user
+          args: [[name, string]]
+          return: i32
+          body:
+            - if:
+                condition: { eq: [{ call: [kontor.auth.valid_name, name] }, 0] }
+                then:
+                  - return: [0]
+            - decl: [upath, string, { call: [<.acl.user_path, name] }]
+            - if:
+                condition: { not: [{ call: [io.exists, upath] }] }
+                then:
+                  - return: [0]
+            - decl: [doc, ptr<yaml_doc>, { call: [yaml.parse_file, upath] }]
+            - decl: [csv, string, { call: [kontor.auth.seq_csv, { call: [yaml.get, { call: [yaml.root, doc] }, "roles"] }] }]
+            - call: [yaml.free, doc]
+            - return: [{ call: [<.acl.allows, csv, "admin"] }]
+
+      # Local users with the admin right other than `name` (FW-62; the
+      # bootstrap token is no user).
+      - def:
+          name: other_admins
+          args: [[name, string]]
+          return: i32
+          body:
+            - decl: [names, list<string>, { call: [kontor.store.list_files, "${<.data_dir}/auth/users"] }]
+            - decl: [count, i32, 0]
+            - decl: [idx, i32, 0]
+            - while:
+                condition: { lt: [idx, names.len] }
+                body:
+                  - decl: [other, string, { call: [names.get, idx] }]
+                  - if:
+                      condition: { and: [{ neq: [other, name] }, { eq: [{ call: [<.is_admin_user, other] }, 1] }] }
+                      then:
+                        - set: [count, { +: [count, 1] }]
+                  - set: [idx, { +: [idx, 1] }]
+            - return: [count]
+
+      - def:
+          name: settings_get
+          args: [[xch, ref<kontor.http.Exchange>]]
+          body:
+            - decl: [who, kontor.auth.Principal, { call: [<.authorize, xch, "admin"] }]
+            - if: { condition: { eq: [who.valid, 0] }, then: [{ return: [] }] }
+            - decl: [acl_now, ref<kontor.auth.AccessControl>, <.acl]
+            - call: [xch.json, 200, { call: [<.settings.view_json, acl_now, <.public_url] }]
+
+      - def:
+          name: settings_put
+          args: [[xch, ref<kontor.http.Exchange>]]
+          body:
+            - decl: [who, kontor.auth.Principal, { call: [<.authorize, xch, "admin"] }]
+            - if: { condition: { eq: [who.valid, 0] }, then: [{ return: [] }] }
+            - decl: [acl_now, ref<kontor.auth.AccessControl>, <.acl]
+            - decl: [problem, string, { call: [<.settings.update, { call: [xch.text] }, acl_now] }]
+            - if:
+                condition: { gt: [problem.len, 0] }
+                then:
+                  - decl: [code, i32, { call: [problem.substr, 0, 3] }]
+                  - call: [xch.error, code, { call: [problem.substr, 4] }]
+                  - return: []
+            - if:
+                condition: { gt: [<.settings.public_url.len, 0] }
+                then:
+                  - set: [<.public_url, <.settings.public_url]
+                  - set: [<.hooks.public_url, <.settings.public_url]
+            - call: [log.info, "settings changed by ${who.name}"]
+            - call: [xch.json, 200, { call: [<.settings.view_json, acl_now, <.public_url] }]
 
       # ── webhooks ───────────────────────────────────────────────────────────
 

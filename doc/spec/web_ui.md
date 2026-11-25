@@ -285,6 +285,9 @@ It needs from aiml (tracked there, spec first):
 - **FW-92** The aiml release carries the wasm32 runtime (`libaiml_wasm.a`)
   and names the emsdk version it was built with, so kontor's CI builds the
   UI out of the aiml release like it builds the binary.
+- **FW-94** The HTTP runtime's file responses answer a matching
+  `If-None-Match` with `304` (today they send the `ETag` but always `200`),
+  for FW-13.
 - **FW-93** Browser hooks for `sessionStorage` get/set and reading/clearing
   the URL fragment (FW-21, FW-22).
 
