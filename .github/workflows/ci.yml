@@ -34,10 +34,17 @@ jobs:
       # The prebuilt compiler and runtime from Pymann/aiml, as a venv
       # (aiml spec/68): every exodus.json here takes $AIML and $AIML_VENV/lib.
       # Repository variable AIML_RELEASE pins a release for every run.
+      # aiml with its libraries comes from kontor first: the bundle aiml's own
+      # CI puts there (generic/aiml/<tag|latest>/aiml-x86_64-linux.tar.gz).
+      # Secrets KONTOR_URL and KONTOR_CA, the same names as in Pymann/aiml;
+      # without them, or if kontor does not answer, GitHub as before.
       - name: Download aiml
         env:
           GH_TOKEN: ${{ github.token }}
           AIML_RELEASE: ${{ github.event.inputs.aiml_release || vars.AIML_RELEASE }}
+          AIML_KONTOR_URL: ${{ secrets.KONTOR_URL }}
+          AIML_KONTOR_CA: ${{ secrets.KONTOR_CA }}
+          AIML_KONTOR_TOKEN: ${{ secrets.AIML_KONTOR_TOKEN || secrets.KONTOR_TOKEN }}
         run: bash .github/ci/setup-aiml.sh "$RUNNER_TEMP/aimlvenv"
 
       # aiml spec/68 §7: the venv's compiler builds the tool itself — no
