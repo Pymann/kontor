@@ -29,7 +29,10 @@ jobs:
       - name: System packages
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends g++ libssl-dev curl skopeo
+          # slapd, ldap-utils, xmlsec1: tests/identity.sh (LDAP and SAML logins,
+          # doc/ecosystem.md §6) -- without them it skips.
+          sudo apt-get install -y --no-install-recommends g++ libssl-dev curl skopeo \
+            slapd ldap-utils xmlsec1
 
       # The prebuilt compiler and runtime from Pymann/aiml, as a venv
       # (aiml spec/68): every exodus.json here takes $AIML and $AIML_VENV/lib.
@@ -50,6 +53,7 @@ jobs:
       - name: Tests
         env:
           KONTOR_BIN: ${{ github.workspace }}/kontor
+          IDENTITY_REQUIRED: "1"
         run: bash tests/run_all.sh
 
       # What a venv user gets: aiml spec/68 §6 builds kontor again with the

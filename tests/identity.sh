@@ -21,7 +21,12 @@ pass() { PASSES=$((PASSES + 1)); echo "  ok   $1"; }
 fail() { FAILS=$((FAILS + 1)); echo "  FAIL $1"; }
 check() { if [ "$2" = "$3" ]; then pass "$1"; else fail "$1: got '$2' want '$3'"; fi; }
 SLAPD="$(command -v slapd || echo /usr/sbin/slapd)"
-if [ ! -x "$SLAPD" ] || ! command -v xmlsec1 >/dev/null; then echo "SKIP: slapd or xmlsec1 missing"; exit 0; fi
+# IDENTITY_REQUIRED=1 (CI) turns the skip into a failure: a suite that skips in
+# silence is how a broken login stays unnoticed.
+if [ ! -x "$SLAPD" ] || ! command -v xmlsec1 >/dev/null; then
+  if [ -n "${IDENTITY_REQUIRED:-}" ]; then echo "  FAIL slapd or xmlsec1 missing (IDENTITY_REQUIRED is set)"; exit 1; fi
+  echo "SKIP: slapd or xmlsec1 missing"; exit 0
+fi
 
 # ── directory ────────────────────────────────────────────────────────────────
 mkdir -p "$WORK/ldapdb"
