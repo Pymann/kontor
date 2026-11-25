@@ -46,7 +46,7 @@ Built ahead of time it is an ordinary program and needs no compiler to run.
 
 ```bash
 . /path/to/venv/env                  # aiml venv /path/to/venv  (aiml spec/68)
-exodus build                         # ./kontor
+aiml build                           # ./kontor (aiml spec/68 §7, no exodus)
 ./kontor 8081 ./data                 # the same arguments, without the `--`
 
 aiml venv /path/to/venv install kontor --git https://github.com/Pymann/kontor
