@@ -33,6 +33,12 @@ jobs:
           # doc/ecosystem.md §6) -- without them it skips.
           sudo apt-get install -y --no-install-recommends g++ libssl-dev curl skopeo \
             slapd ldap-utils xmlsec1
+          # The package's AppArmor profile confines slapd to /etc/ldap and
+          # /var/lib/ldap; the test's throwaway directory lives in /tmp.
+          if [ -f /etc/apparmor.d/usr.sbin.slapd ]; then
+            sudo ln -sf /etc/apparmor.d/usr.sbin.slapd /etc/apparmor.d/disable/
+            sudo apparmor_parser -R /etc/apparmor.d/usr.sbin.slapd || true
+          fi
 
       # The prebuilt compiler and runtime from Pymann/aiml, as a venv
       # (aiml spec/68): every exodus.json here takes $AIML and $AIML_VENV/lib.

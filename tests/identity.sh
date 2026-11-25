@@ -75,8 +75,13 @@ sn: Example
 userPassword: $("$SP" -s bob-pw)
 LDIF
 "$(command -v slapadd || echo /usr/sbin/slapadd)" -f "$WORK/slapd.conf" -l "$WORK/data.ldif" > /dev/null 2>&1 || { echo "FAIL slapadd"; exit 1; }
-"$SLAPD" -f "$WORK/slapd.conf" -h "ldap://127.0.0.1:$LDAP_PORT/" > /dev/null 2>&1
+"$SLAPD" -f "$WORK/slapd.conf" -h "ldap://127.0.0.1:$LDAP_PORT/" > "$WORK/slapd.log" 2>&1
 for _ in $(seq 50); do [ -f "$WORK/slapd.pid" ] && break; sleep 0.1; done
+# A directory that never came up would show as six 401s further down; say why
+# instead (Ubuntu's AppArmor profile for slapd keeps it out of /tmp).
+if [ ! -f "$WORK/slapd.pid" ]; then
+  echo "  FAIL slapd did not start (AppArmor profile usr.sbin.slapd? see CI)"; cat "$WORK/slapd.log"; exit 1
+fi
 
 # ── IdP keys + config ────────────────────────────────────────────────────────
 openssl req -x509 -newkey rsa:2048 -nodes -days 2 -subj "/CN=idp" -keyout "$WORK/idp_key.pem" -out "$WORK/idp_cert.pem" 2>/dev/null
