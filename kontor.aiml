@@ -351,6 +351,33 @@
       - call: [g_lock.release]
 
 - def:
+    name: on_list_generic
+    args: [[req, http_request_handle], [resp, http_response_handle]]
+    body:
+      - call: [g_lock.acquire]
+      - decl: [xch, ptr<kontor.http.Exchange>, { call: [wrap, req, resp] }]
+      - call: [g_api.list_generic_query, xch]
+      - call: [g_lock.release]
+
+- def:
+    name: on_list_exodus
+    args: [[req, http_request_handle], [resp, http_response_handle]]
+    body:
+      - call: [g_lock.acquire]
+      - decl: [xch, ptr<kontor.http.Exchange>, { call: [wrap, req, resp] }]
+      - call: [g_api.list_exodus, xch]
+      - call: [g_lock.release]
+
+- def:
+    name: on_list_versions
+    args: [[req, http_request_handle], [resp, http_response_handle]]
+    body:
+      - call: [g_lock.acquire]
+      - decl: [xch, ptr<kontor.http.Exchange>, { call: [wrap, req, resp] }]
+      - call: [g_api.list_versions, xch]
+      - call: [g_lock.release]
+
+- def:
     name: on_catalog_generic
     args: [[req, http_request_handle], [resp, http_response_handle]]
     body:
@@ -699,6 +726,9 @@
       - call: [srv.route, "GET", "/api/v1/catalog", on_catalog]
       - call: [srv.route, "GET", "/api/v1/catalog/exodus/:name", on_catalog_project]
       - call: [srv.route, "GET", "/api/v1/catalog/generic", on_catalog_generic]
+      - call: [srv.route, "GET", "/api/v1/list/generic", on_list_generic]
+      - call: [srv.route, "GET", "/api/v1/list/exodus", on_list_exodus]
+      - call: [srv.route, "GET", "/api/v1/list/exodus/:name", on_list_versions]
       - call: [srv.route, "GET", "/api/v1/retention", on_retention_get]
       - call: [srv.route, "PUT", "/api/v1/retention", on_retention_put]
       - call: [srv.route, "POST", "/api/v1/retention/preview", on_retention_preview]

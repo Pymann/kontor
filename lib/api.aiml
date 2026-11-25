@@ -268,6 +268,24 @@
           name: generic_get
           args: [[xch, ref<kontor.http.Exchange>]]
           body:
+            # FL-04: a directory URL (trailing slash) lists itself.
+            - decl: [full, string, { call: [xch.path] }]
+            - if:
+                condition: { eq: [{ call: [full.ends_with, "/"] }, 1] }
+                then:
+                  - decl: [cut, i32, 9]
+                  - if:
+                      condition: { eq: [{ call: [full.starts_with, "/api/v1/generic/"] }, 1] }
+                      then:
+                        - set: [cut, 16]
+                  - decl: [dir_rel, string, ""]
+                  - decl: [dir_len, i32, { -: [full.len, { +: [cut, 1] }] }]
+                  - if:
+                      condition: { gt: [dir_len, 0] }
+                      then:
+                        - set: [dir_rel, { call: [full.substr, cut, dir_len] }]
+                  - call: [<.list_generic, xch, dir_rel]
+                  - return: []
             - decl: [who, kontor.auth.Principal, { call: [<.authorize, xch, "read"] }]
             - if: { condition: { eq: [who.valid, 0] }, then: [{ return: [] }] }
             - decl: [rel, string, { call: [<.generic_path, xch] }]
@@ -276,9 +294,177 @@
             - if:
                 condition: { eq: [digest.len, 0] }
                 then:
-                  - call: [xch.error, 404, "not found"]
+                  # FL-05: name the deepest existing directory to list.
+                  - decl: [segs, list<string>, { call: [rel.split, "/"] }]
+                  - decl: [known, string, ""]
+                  - decl: [sidx, i32, 0]
+                  - decl: [walking, i32, 1]
+                  - while:
+                      condition: { and: [{ eq: [walking, 1] }, { lt: [sidx, { -: [segs.len, 1] }] }] }
+                      body:
+                        - decl: [cand, string, { call: [segs.get, sidx] }]
+                        - if: { condition: { gt: [known.len, 0] }, then: [{ set: [cand, "${known}/${cand}"] }] }
+                        - decl: [cand_dir, string, "${<.data_dir}/generic/${cand}"]
+                        - decl: [is_dir, i32, 0]
+                        - if: { condition: { call: [io.exists, cand_dir] }, then: [{ set: [is_dir, 1] }] }
+                        - if: { condition: { call: [io.exists, "${cand_dir}/blob.sha256"] }, then: [{ set: [is_dir, 0] }] }
+                        - if:
+                            condition: { eq: [is_dir, 1] }
+                            then:
+                              - set: [known, cand]
+                              - set: [sidx, { +: [sidx, 1] }]
+                            else:
+                              - set: [walking, 0]
+                  - decl: [hint, string, { call: [kontor.text.json_str, "/api/v1/list/generic?prefix=${known}"] }]
+                  - call: [xch.json, 404, "{\"error\":\"not found\",\"code\":\"not_found\",\"list\":${hint}}"]
                   - return: []
             - call: [<.send_blob, xch, digest]
+
+      # ── listing (doc/spec/listing.md) ──────────────────────────────────────
+
+      # A non-negative integer query parameter, `fallback` when absent, -1
+      # when it is not a number (FL-02).
+      - def:
+          name: int_param
+          args: [[xch, ref<kontor.http.Exchange>], [key, string], [fallback, i32]]
+          return: i32
+          body:
+            - decl: [raw, string, { call: [xch.query, key] }]
+            - if: { condition: { eq: [raw.len, 0] }, then: [{ return: [fallback] }] }
+            - if:
+                condition: { or: [{ eq: [{ call: [kontor.retention.all_digits, raw] }, 0] }, { gt: [raw.len, 9] }] }
+                then:
+                  - return: [-1]
+            - decl: [wide, i64, raw]
+            - decl: [num, i32, wide]
+            - return: [num]
+
+      # limit (default 1000, capped at 10000), or -1 after a 400 (FL-02).
+      - def:
+          name: list_limit
+          args: [[xch, ref<kontor.http.Exchange>]]
+          return: i32
+          body:
+            - decl: [limit, i32, { call: [<.int_param, xch, "limit", 1000] }]
+            - if: { condition: { gt: [limit, 10000] }, then: [{ set: [limit, 10000] }] }
+            - decl: [offset, i32, { call: [<.int_param, xch, "offset", 0] }]
+            - if:
+                condition: { or: [{ lt: [limit, 0] }, { lt: [offset, 0] }] }
+                then:
+                  - call: [xch.error, 400, "limit and offset are non-negative integers"]
+                  - return: [-1]
+            - return: [limit]
+
+      # GET /api/v1/list/generic and GET /generic/<dir>/ (FL-01…FL-04).
+      - def:
+          name: list_generic
+          static_off: ["str_cmp"]
+          args: [[xch, ref<kontor.http.Exchange>], [prefix, string]]
+          body:
+            - decl: [who, kontor.auth.Principal, { call: [<.authorize, xch, "read"] }]
+            - if: { condition: { eq: [who.valid, 0] }, then: [{ return: [] }] }
+            - if:
+                condition: { and: [{ gt: [prefix.len, 0] }, { eq: [{ call: [kontor.text.safe_rel_path, prefix] }, 0] }] }
+                then:
+                  - call: [xch.error, 400, "invalid prefix"]
+                  - return: []
+            - decl: [match, string, { call: [xch.query, "match"] }]
+            - if:
+                condition: { and: [{ gt: [match.len, 0] }, { eq: [{ call: [kontor.text.safe_rel_path, match] }, 0] }] }
+                then:
+                  - call: [xch.error, 400, "invalid match"]
+                  - return: []
+            - decl: [recursive, i32, 0]
+            - decl: [rec_flag, string, { call: [xch.query, "recursive"] }]
+            - if: { condition: { eq: [rec_flag, "1"] }, then: [{ set: [recursive, 1] }] }
+            - if: { condition: { ge: [{ call: [match.index_of, "/"] }, 0] }, then: [{ set: [recursive, 1] }] }
+            - if: { condition: { ge: [{ call: [match.index_of, "**"] }, 0] }, then: [{ set: [recursive, 1] }] }
+            - decl: [sort_by, string, { call: [xch.query, "sort"] }]
+            - decl: [by_published, i32, 0]
+            - if:
+                condition: { eq: [sort_by, "published"] }
+                then:
+                  - set: [by_published, 1]
+                else:
+                  - if:
+                      condition: { and: [{ gt: [sort_by.len, 0] }, { neq: [sort_by, "path"] }] }
+                      then:
+                        - call: [xch.error, 400, "sort is path or published"]
+                        - return: []
+            - decl: [limit, i32, { call: [<.list_limit, xch] }]
+            - if: { condition: { lt: [limit, 0] }, then: [{ return: [] }] }
+            - decl: [offset, i32, { call: [<.int_param, xch, "offset", 0] }]
+            - if:
+                condition: { gt: [prefix.len, 0] }
+                then:
+                  - decl: [pdir, string, "${<.data_dir}/generic/${prefix}"]
+                  - decl: [listable, i32, 0]
+                  - if: { condition: { call: [io.exists, pdir] }, then: [{ set: [listable, 1] }] }
+                  - if:
+                      condition: { call: [io.exists, "${pdir}/blob.sha256"] }
+                      then:
+                        - decl: [below, list<string>, { call: [kontor.store.list_subdirs, pdir] }]
+                        - if: { condition: { eq: [below.len, 0] }, then: [{ set: [listable, 0] }] }
+                  - if:
+                      condition: { eq: [listable, 0] }
+                      then:
+                        - call: [xch.error, 404, "no such directory"]
+                        - return: []
+            - decl: [ask, kontor.catalog.ListQuery]
+            - set: [ask.prefix, prefix]
+            - set: [ask.match, match]
+            - set: [ask.recursive, recursive]
+            - set: [ask.by_published, by_published]
+            - set: [ask.limit, limit]
+            - set: [ask.offset, offset]
+            - call: [xch.json, 200, { call: [<.catalog.list_generic_json, ask] }]
+
+      - def:
+          name: list_generic_query
+          args: [[xch, ref<kontor.http.Exchange>]]
+          body:
+            - call: [<.list_generic, xch, { call: [xch.query, "prefix"] }]
+
+      # GET /api/v1/list/exodus (FL-10).
+      - def:
+          name: list_exodus
+          args: [[xch, ref<kontor.http.Exchange>]]
+          body:
+            - decl: [who, kontor.auth.Principal, { call: [<.authorize, xch, "read"] }]
+            - if: { condition: { eq: [who.valid, 0] }, then: [{ return: [] }] }
+            - call: [xch.json, 200, { call: [<.catalog.list_exodus_json] }]
+
+      # GET /api/v1/list/exodus/<name> (FL-11).
+      - def:
+          name: list_versions
+          args: [[xch, ref<kontor.http.Exchange>]]
+          body:
+            - decl: [who, kontor.auth.Principal, { call: [<.authorize, xch, "read"] }]
+            - if: { condition: { eq: [who.valid, 0] }, then: [{ return: [] }] }
+            - decl: [name, string, { call: [xch.param, "name"] }]
+            - decl: [match, string, { call: [xch.query, "match"] }]
+            - decl: [bad_name, i32, 0]
+            - if: { condition: { eq: [{ call: [kontor.text.safe_segment, name] }, 0] }, then: [{ set: [bad_name, 1] }] }
+            - decl: [bad_match, i32, 0]
+            - if:
+                condition: { and: [{ gt: [match.len, 0] }, { eq: [{ call: [kontor.text.safe_segment, match] }, 0] }] }
+                then:
+                  - set: [bad_match, 1]
+            - if:
+                condition: { or: [{ eq: [bad_name, 1] }, { eq: [bad_match, 1] }] }
+                then:
+                  - call: [xch.error, 400, "invalid project name or match"]
+                  - return: []
+            - decl: [limit, i32, { call: [<.list_limit, xch] }]
+            - if: { condition: { lt: [limit, 0] }, then: [{ return: [] }] }
+            - decl: [offset, i32, { call: [<.int_param, xch, "offset", 0] }]
+            - decl: [body, string, { call: [<.catalog.list_versions_json, name, match, limit, offset] }]
+            - if:
+                condition: { eq: [body.len, 0] }
+                then:
+                  - call: [xch.error, 404, "unknown project"]
+                  - return: []
+            - call: [xch.json, 200, body]
 
       # ── exodus repository ──────────────────────────────────────────────────
 

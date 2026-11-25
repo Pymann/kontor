@@ -30,8 +30,8 @@ same store and the same publish metadata (web_ui.md FW-34).
   ```
 
   `path` is the full path below `/generic/`, so `GET /generic/<path>`
-  downloads it as is. `published_ms` is `0` and `publisher` is `""` for a
-  file published before publish metadata existed.
+  downloads it as is. A file published before publish metadata existed
+  gets the time kontor first saw it (web_ui.md FW-34) and `publisher` `""`.
 - **FL-02** Query parameters, all optional:
   - `prefix` — a directory below `generic/` (default: the root). Same rules
     as a generic path: no `..`, no empty segment, no leading `/` → `400`.
@@ -62,7 +62,8 @@ same store and the same publish metadata (web_ui.md FW-34).
 
 - **FL-10** `GET /api/v1/list/exodus` (right `read`):
   `{"items":[{"name","newest","versions"}]}`, sorted by name; `newest` is the
-  highest version in spec/68's version order, `versions` their count.
+  highest live version in spec/68's version order (`""` when every version
+  is deleted), `versions` counts what FL-11 lists, tombstones included.
 - **FL-11** `GET /api/v1/list/exodus/<name>` (right `read`): every version,
   newest first in version order,
   `{"name","items":[{"version","published_ms","publisher","sha256","bytes","deleted"}],"total","offset","limit"}`.
