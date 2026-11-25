@@ -21,15 +21,10 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
-      EXODUS_CACHE: ${{ github.workspace }}/__exodus_cache
       AIML_CACHE: ${{ github.workspace }}/__aiml_cache
       AIML_MEM_V3: "1"
     steps:
       - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"   # exodus: requires-python >= 3.12
 
       - name: System packages
         run: |
@@ -45,18 +40,10 @@ jobs:
           AIML_RELEASE: ${{ github.event.inputs.aiml_release || vars.AIML_RELEASE }}
         run: bash .github/ci/setup-aiml.sh "$RUNNER_TEMP/aimlvenv"
 
-      - name: Install Exodus
-        run: |
-          python -m pip install -q "git+https://github.com/Pymann/exodus.git"
-          exodus --help > /dev/null
-
-      # Pinned apt packages of exodus.json into __exodus_cache (none today;
-      # the step is here so a pin added later is fetched without a CI change).
-      - name: Exodus package setup
-        run: exodus pkg install
-
+      # aiml spec/68 §7: the venv's compiler builds the tool itself — no
+      # exodus, no Python.
       - name: Build
-        run: exodus build -j "$(nproc)"
+        run: aiml build
 
       # Unit tests run by the compiler (JIT); e2e, ecosystem and identity
       # against the built ./kontor, not `aiml kontor.aiml --`.
