@@ -23,7 +23,9 @@ trap 'rm -rf "$BUILD"' EXIT
 rm -rf "$OUT"; mkdir -p "$OUT"
 
 "$AIML" main.aiml --target wasm32 --emit-main -o "$BUILD/kontor-ui.ll"
-"$EMCC" "$BUILD/kontor-ui.ll" -o "$OUT/kontor-ui.js" \
+# The imports (kontor_ui.aiml, ../lib/text.aiml) come out as .ll files of
+# their own next to the main one; all of them go into the link.
+"$EMCC" "$BUILD"/*.ll -o "$OUT/kontor-ui.js" \
     -L"$WASM_LIB" -laiml_wasm -fexceptions -O2 \
     -sASYNCIFY=1 -sASYNCIFY_STACK_SIZE=1048576 -sSTACK_SIZE=8388608 \
     -sALLOW_MEMORY_GROWTH=1 -sENVIRONMENT=web \
