@@ -167,7 +167,13 @@ Retention is **opt-in**: without a policy nothing is ever deleted.
 - **FW-44** `POST /api/v1/retention/preview` (right `admin`, optional body:
   a policy document to try instead of the stored one) answers
   `{"delete":[{"repo","name","version","bytes","rule"}],"kept":[{…,"reason"}],"bytes":N}`
-  and changes nothing.
+  and changes nothing. `kept` lists every object the policy leaves, each
+  with one reason, first that applies: `newest`, `dependency`, `protected`
+  (FW-42), `no_rule` (no rule fits, or it sets no limit for this kind of
+  object), `keep_last` (within the newest N), `max_age` (not old enough).
+  Generic files have no versions, so a generic rule needs `max_age_days`;
+  `untagged_after_days` is for oci rules only. An OCI tag's age order is
+  `published_ms`; an exodus project's is version order.
 - **FW-45** `POST /api/v1/retention/run` (right `admin`) applies the stored
   policy and answers `202 {"run":"<id>"}`; the run happens on its own
   thread, under the store lock per deleted object, so uploads keep working.
@@ -236,7 +242,7 @@ an aiml program, `ui/kontor_ui.aiml`, drawn with aiml's UI widgets
   `api` (HTTP client and session), `state` (catalog, users, retention model),
   `router` and one instance per page, wired by `sees` edges; the entry point
   only does `{new: KontorUi}` and runs it. **No globals except constants**
-  (`- const:`); everything mutable is a member of a group instance. The same
+  (`decl: [..., { const: true }]`); everything mutable is a member of a group instance. The same
   rule holds for the backend code this chapter adds (retention runner,
   catalog, settings): new state lives in classes, not in `- decl:` at file
   scope.
