@@ -92,6 +92,7 @@ exists under `/api/v1/…`; `/generic/…` and `/exodus/…` have `/api/v1/` ali
 | GET | `/api/v1/impact?apt=<pkg>&version=<v>` | read | Rebuild plan for a system package version. |
 | GET | `/api/v1/health` | – | |
 | GET | `/api/v1/whoami` | – | `{name, kind (anonymous/user/token), roles}` |
+| GET | `/api/v1/transfers` | read | Is an upload or download running right now? `{active, uploads, downloads, transfers[], completed, last_activity_ms}`, see [doc/spec/transfers.md](doc/spec/transfers.md). |
 | POST | `/api/v1/tokens` | authenticated | `{label, roles[], owner?}` → `{id, owner, roles, token}`; the secret is shown once. Tokens cannot carry rights their creator lacks; another `owner` needs admin. |
 | GET | `/api/v1/tokens` | authenticated | Own tokens (admin: all), never secrets. |
 | DELETE | `/api/v1/tokens/<id>` | authenticated | Revoke (own; admin: any). |
@@ -307,6 +308,7 @@ leaves a half-written record; restarting kontor resumes queued deliveries.
 | `lib/oci.aiml` | `kontor.oci.Registry` — OCI Distribution v1.1 |
 | `lib/hooks.aiml` | `kontor.hooks.WebhookHub` — subscriptions, queue, signed delivery |
 | `lib/store.aiml` | content-addressed storage, atomic small files |
+| `lib/transfers.aiml` | `kontor.transfers.TransferBoard` — running uploads and downloads |
 | `lib/text.aiml` | JSON output, version ordering, path checks |
 
 ## Tests
@@ -327,6 +329,8 @@ checksum and path-traversal rejection, rebuild plans, unchanged detection) and
 of an OCI layout (`tests/fixtures/oci/make_layout.py`), a cosmos run-layers
 artifact read back via `/v2/` and `/api/v1/layers`, and webhooks against
 signature-verifying receivers (one fails twice, then accepts).
+`tests/transfers.sh` checks `GET /api/v1/transfers` with rate-limited uploads
+and downloads.
 
 ## aiml requirements
 
@@ -362,7 +366,9 @@ graph) runs under valgrind with 0 invalid accesses.
 ## Limits of the prototype
 
 - One lock serializes all request handlers (aiml's server runs one thread per
-  connection); webhook delivery runs on its own thread outside it.
+  connection); webhook delivery runs on its own thread outside it.  Downloads
+  stream their file after the handler gave the lock up, so a long download
+  does not hold up other requests.
 - Only the newest version of each project is a graph node.
 - LDAP is asked on every Basic-authenticated request (no cache); SAML session
   tokens expire, but expired token files are not swept.

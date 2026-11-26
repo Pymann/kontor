@@ -22,6 +22,13 @@
     members:
       - [req, http_request_handle, null, { access: public }]
       - [resp, http_response_handle, null, { access: public }]
+      # defer=1: `file` only remembers the file; the route handler sends it
+      # with send_deferred after it gave up kontor's global lock, so a long
+      # download does not block every other request (transfers.md TR-06).
+      - [defer, i32, 0, { access: public }]
+      - [deferred_file, string, "", { access: public }]
+      # the authorized caller (set by RepositoryApi.authorize_as), "" if none
+      - [user, string, "", { access: public }]
     methods:
       # Named route segment ("/exodus/:name/...") or "".
       - def:
@@ -159,7 +166,22 @@
           body:
             - decl: [out, http_response_handle, <.resp]
             - call: [out.headers.put, "content-type", content_type]
+            - if:
+                condition: { eq: [<.defer, 1] }
+                then:
+                  - set: [<.deferred_file, file_path]
+                  - return: []
             - set: [out.body_file, file_path]
+            - call: [out.send]
+
+      # Sends the file `file` remembered under defer=1 (nothing if none).
+      - def:
+          name: send_deferred
+          body:
+            - if: { condition: { eq: [<.deferred_file.len, 0] }, then: [{ return: [] }] }
+            - decl: [out, http_response_handle, <.resp]
+            - set: [out.body_file, <.deferred_file]
+            - set: [<.deferred_file, ""]
             - call: [out.send]
 
       - def:

@@ -42,6 +42,14 @@
       - call: [tally.check, "anonymous rights", store.rights, ",read,"]
       - call: [tally.check, "no session", "${{ call: [store.signed_in] }}", "0"]
 
+      - print: ["running transfers (transfers.md TR-30)"]
+      - call: [store.poll, 10000]
+      - call: [tally.check, "idle", store.activity, "Idle: no uploads or downloads"]
+      - call: [tally.check, "no lines", "${store.activity_lines.len}", "0"]
+      - set: [store.activity, ""]
+      - call: [store.poll, 11000]
+      - call: [tally.check, "polls at most every 3 s", store.activity, ""]
+
       - print: ["sign in (FW-20)"]
       - set: [store.login_name, "ops"]
       - set: [store.login_password, "wrong-password"]

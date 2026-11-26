@@ -1,0 +1,182 @@
+# kontor.transfers — which uploads and downloads are running right now
+# (doc/spec/transfers.md, GET /api/v1/transfers).
+#
+# The board has its own lock, not kontor's global one: it is written at the
+# start and the end of every transfer and read by the status endpoint while
+# other handlers hold the global lock.
+#
+# Three phases:
+#   upload   receiving  the HTTP runtime is still reading the body into its
+#                       spool file (<data>/tmp/spool/aiml-body-*); kontor's
+#                       handler has not started, so method, path and user are
+#                       not known yet — the spool file's size is the progress
+#   upload   storing    the body is complete, the handler checks and stores it
+#   download sending    the response file is being streamed to the client
+#                       (outside the global lock)
+
+- namespace: kontor.transfers
+
+- import: "text.aiml"
+
+- model:
+    name: Transfer
+    fields:
+      - [ident, i64, 0]
+      - [direction, string, ""]
+      - [phase, string, ""]
+      - [method, string, ""]
+      - [path, string, ""]
+      - [user, string, ""]
+      - [bytes, i64, 0]
+      - [started_ms, i64, 0]
+      # basename of the spool file of an upload (so it is not counted twice)
+      - [spool, string, ""]
+
+- class:
+    name: TransferBoard
+    members:
+      - [guard, lock]
+      - [active, list<kontor.transfers.Transfer>, [], { access: public }]
+      - [next_id, i64, 1, { access: public }]
+      - [done_uploads, i64, 0, { access: public }]
+      - [done_downloads, i64, 0, { access: public }]
+      - [last_ms, i64, 0, { access: public }]
+      # spool file name → when the board first saw it (aiml has no mtime)
+      - [first_seen, map<string:i64>, {}, { access: public }]
+      - [spool_dir, string, "", { access: public }]
+    methods:
+      - def:
+          name: init
+          args: [[spool_dir, string]]
+          body:
+            - call: [<.guard.init]
+            - set: [<.spool_dir, spool_dir]
+
+      # A transfer starts (`entry` without ident and started_ms); returns its
+      # ident for `finish`.
+      - def:
+          name: begin
+          args: [[entry, kontor.transfers.Transfer]]
+          return: i64
+          body:
+            - call: [<.guard.acquire]
+            - decl: [given, i64, <.next_id]
+            - set: [entry.ident, given]
+            - set: [entry.started_ms, { call: [time.now] }]
+            - call: [<.active.push, entry]
+            - set: [<.next_id, { +: [given, 1] }]
+            - set: [<.last_ms, entry.started_ms]
+            - call: [<.guard.release]
+            - return: [given]
+
+      # A transfer ended (successfully or not).
+      - def:
+          name: finish
+          args: [[tid, i64]]
+          body:
+            - call: [<.guard.acquire]
+            - decl: [idx, i32, 0]
+            - decl: [found, i32, -1]
+            - decl: [dir_found, string, ""]
+            - while:
+                condition: { and: [{ lt: [idx, <.active.len] }, { lt: [found, 0] }] }
+                body:
+                  - decl: [entry, kontor.transfers.Transfer, { call: [<.active.get, idx] }]
+                  - if:
+                      condition: { eq: [entry.ident, tid] }
+                      then:
+                        - set: [found, idx]
+                        - set: [dir_found, entry.direction]
+                  - set: [idx, { +: [idx, 1] }]
+            - if:
+                condition: { ge: [found, 0] }
+                then:
+                  - call: [<.active.remove, found]
+                  - if:
+                      condition: { eq: [dir_found, "upload"] }
+                      then:
+                        - set: [<.done_uploads, { +: [<.done_uploads, 1] }]
+                      else:
+                        - set: [<.done_downloads, { +: [<.done_downloads, 1] }]
+            - set: [<.last_ms, { call: [time.now] }]
+            - call: [<.guard.release]
+
+      # 1 when a running transfer owns the spool file `name`.
+      - def:
+          name: owns_spool
+          args: [[name, string]]
+          return: i32
+          body:
+            - decl: [idx, i32, 0]
+            - while:
+                condition: { lt: [idx, <.active.len] }
+                body:
+                  - decl: [entry, kontor.transfers.Transfer, { call: [<.active.get, idx] }]
+                  - if:
+                      condition: { eq: [entry.spool, name] }
+                      then:
+                        - return: [1]
+                  - set: [idx, { +: [idx, 1] }]
+            - return: [0]
+
+      # The status document of GET /api/v1/transfers.
+      - def:
+          name: status_json
+          return: string
+          body:
+            - call: [<.guard.acquire]
+            - decl: [now_ms, i64, { call: [time.now] }]
+            - decl: [items, string, ""]
+            - decl: [ups, i32, 0]
+            - decl: [downs, i32, 0]
+            # bodies the runtime is still receiving
+            - decl: [present, map<string:i64>, {}]
+            - if:
+                condition: { and: [{ gt: [<.spool_dir.len, 0] }, { call: [io.is_dir, <.spool_dir] }] }
+                then:
+                  - decl: [entries, list<path>, { call: [io.list_dir, <.spool_dir] }]
+                  - decl: [sidx, i32, 0]
+                  - while:
+                      condition: { lt: [sidx, entries.len] }
+                      body:
+                        - decl: [entry_path, path, { call: [entries.get, sidx] }]
+                        - decl: [fname, string, { call: [entry_path.name] }]
+                        - if:
+                            condition: { and: [{ eq: [{ call: [fname.starts_with, "aiml-body-"] }, 1] }, { eq: [{ call: [<.owns_spool, fname] }, 0] }] }
+                            then:
+                              - decl: [seen, i64, now_ms]
+                              - if:
+                                  condition: { eq: [{ call: [<.first_seen.contains, fname] }, 1] }
+                                  then:
+                                    - set: [seen, { call: [<.first_seen.get, fname] }]
+                              - call: [present.put, fname, seen]
+                              - decl: [got, i64, { call: [io.file_size, "${<.spool_dir}/${fname}"] }]
+                              - if: { condition: { lt: [got, 0] }, then: [{ set: [got, 0] }] }
+                              - if: { condition: { gt: [items.len, 0] }, then: [{ set: [items, "${items},"] }] }
+                              - set: [items, "${items}{\"id\":\"spool-${{ call: [fname.substr, 10] }}\",\"direction\":\"upload\",\"phase\":\"receiving\",\"method\":null,\"path\":null,\"user\":null,\"bytes\":${got},\"started_ms\":${seen},\"elapsed_ms\":${{ -: [now_ms, seen] }}}"]
+                              - set: [ups, { +: [ups, 1] }]
+                        - set: [sidx, { +: [sidx, 1] }]
+            - set: [<.first_seen, present]
+            - decl: [idx, i32, 0]
+            - while:
+                condition: { lt: [idx, <.active.len] }
+                body:
+                  - decl: [entry, kontor.transfers.Transfer, { call: [<.active.get, idx] }]
+                  - decl: [user_json, string, "null"]
+                  - if: { condition: { gt: [entry.user.len, 0] }, then: [{ set: [user_json, { call: [kontor.text.json_str, entry.user] }] }] }
+                  - if: { condition: { gt: [items.len, 0] }, then: [{ set: [items, "${items},"] }] }
+                  - set: [items, "${items}{\"id\":\"${entry.ident}\",\"direction\":\"${entry.direction}\",\"phase\":\"${entry.phase}\",\"method\":${{ call: [kontor.text.json_str, entry.method] }},\"path\":${{ call: [kontor.text.json_str, entry.path] }},\"user\":${user_json},\"bytes\":${entry.bytes},\"started_ms\":${entry.started_ms},\"elapsed_ms\":${{ -: [now_ms, entry.started_ms] }}}"]
+                  - if:
+                      condition: { eq: [entry.direction, "upload"] }
+                      then:
+                        - set: [ups, { +: [ups, 1] }]
+                      else:
+                        - set: [downs, { +: [downs, 1] }]
+                  - set: [idx, { +: [idx, 1] }]
+            - decl: [busy, string, "false"]
+            - if: { condition: { gt: [{ +: [ups, downs] }, 0] }, then: [{ set: [busy, "true"] }] }
+            - decl: [last_json, string, "null"]
+            - if: { condition: { gt: [<.last_ms, 0] }, then: [{ set: [last_json, "${<.last_ms}"] }] }
+            - decl: [doc, string, "{\"active\":${busy},\"uploads\":${ups},\"downloads\":${downs},\"transfers\":[${items}],\"completed\":{\"uploads\":${<.done_uploads},\"downloads\":${<.done_downloads}},\"last_activity_ms\":${last_json},\"now_ms\":${now_ms}}"]
+            - call: [<.guard.release]
+            - return: [doc]

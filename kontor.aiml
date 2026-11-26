@@ -35,6 +35,75 @@
       - set: [xch.resp, resp]
       - return: [xch]
 
+# ── running transfers (doc/spec/transfers.md) ─────────────────────────────
+
+# An upload whose body the runtime has read: on the board until untrack.
+# Requests without a body (an OCI upload session's POST) are not transfers;
+# the result is then 0.
+- def:
+    name: track_upload
+    args: [[req, http_request_handle]]
+    return: i64
+    body:
+      - decl: [size, i64, req.body_len]
+      - if: { condition: { le: [size, 0] }, then: [{ return: [0] }] }
+      - decl: [spool, string, ""]
+      - decl: [spooled, string, req.body_path]
+      - if:
+          condition: { neq: [spooled, null] }
+          then:
+            - decl: [spool_path, path, spooled]
+            - set: [spool, { call: [spool_path.name] }]
+      - decl: [entry, kontor.transfers.Transfer]
+      - set: [entry.direction, "upload"]
+      - set: [entry.phase, "storing"]
+      - set: [entry.method, req.method]
+      - set: [entry.path, req.path]
+      - set: [entry.bytes, size]
+      - set: [entry.spool, spool]
+      - return: [{ call: [g_api.transfers.begin, entry] }]
+
+- def:
+    name: untrack
+    args: [[tid, i64]]
+    body:
+      - if: { condition: { gt: [tid, 0] }, then: [{ call: [g_api.transfers.finish, tid] }] }
+
+# Sends the file a download handler left behind (Exchange.defer), outside
+# the global lock, and keeps it on the board while it streams.
+- def:
+    name: send_tracked
+    args: [[xch, ref<kontor.http.Exchange>]]
+    body:
+      - if: { condition: { eq: [xch.deferred_file.len, 0] }, then: [{ return: [] }] }
+      - decl: [inreq, http_request_handle, xch.req]
+      - decl: [verb, string, inreq.method]
+      - if:
+          condition: { eq: [verb, "HEAD"] }
+          then:
+            - call: [xch.send_deferred]
+            - return: []
+      - decl: [size, i64, { call: [io.file_size, xch.deferred_file] }]
+      - decl: [entry, kontor.transfers.Transfer]
+      - set: [entry.direction, "download"]
+      - set: [entry.phase, "sending"]
+      - set: [entry.method, verb]
+      - set: [entry.path, inreq.path]
+      - set: [entry.user, xch.user]
+      - set: [entry.bytes, size]
+      - decl: [tid, i64, { call: [g_api.transfers.begin, entry] }]
+      - call: [xch.send_deferred]
+      - call: [g_api.transfers.finish, tid]
+
+- def:
+    name: on_transfers
+    args: [[req, http_request_handle], [resp, http_response_handle]]
+    body:
+      - call: [g_lock.acquire]
+      - decl: [xch, ptr<kontor.http.Exchange>, { call: [wrap, req, resp] }]
+      - call: [g_api.transfers_view, xch]
+      - call: [g_lock.release]
+
 - def:
     name: on_health
     args: [[req, http_request_handle], [resp, http_response_handle]]
@@ -66,10 +135,12 @@
     name: on_manifest_put
     args: [[req, http_request_handle], [resp, http_response_handle]]
     body:
+      - decl: [tid, i64, { call: [track_upload, req] }]
       - call: [g_lock.acquire]
       - decl: [xch, ptr<kontor.http.Exchange>, { call: [wrap, req, resp] }]
       - call: [g_api.manifest_put, xch]
       - call: [g_lock.release]
+      - call: [untrack, tid]
 
 - def:
     name: on_manifest_get
@@ -77,17 +148,21 @@
     body:
       - call: [g_lock.acquire]
       - decl: [xch, ptr<kontor.http.Exchange>, { call: [wrap, req, resp] }]
+      - set: [xch.defer, 1]
       - call: [g_api.manifest_get, xch]
       - call: [g_lock.release]
+      - call: [send_tracked, xch]
 
 - def:
     name: on_package_put
     args: [[req, http_request_handle], [resp, http_response_handle]]
     body:
+      - decl: [tid, i64, { call: [track_upload, req] }]
       - call: [g_lock.acquire]
       - decl: [xch, ptr<kontor.http.Exchange>, { call: [wrap, req, resp] }]
       - call: [g_api.package_put, xch]
       - call: [g_lock.release]
+      - call: [untrack, tid]
 
 - def:
     name: on_package_get
@@ -95,17 +170,21 @@
     body:
       - call: [g_lock.acquire]
       - decl: [xch, ptr<kontor.http.Exchange>, { call: [wrap, req, resp] }]
+      - set: [xch.defer, 1]
       - call: [g_api.package_get, xch]
       - call: [g_lock.release]
+      - call: [send_tracked, xch]
 
 - def:
     name: on_generic_put
     args: [[req, http_request_handle], [resp, http_response_handle]]
     body:
+      - decl: [tid, i64, { call: [track_upload, req] }]
       - call: [g_lock.acquire]
       - decl: [xch, ptr<kontor.http.Exchange>, { call: [wrap, req, resp] }]
       - call: [g_api.generic_put, xch]
       - call: [g_lock.release]
+      - call: [untrack, tid]
 
 - def:
     name: on_generic_get
@@ -113,8 +192,10 @@
     body:
       - call: [g_lock.acquire]
       - decl: [xch, ptr<kontor.http.Exchange>, { call: [wrap, req, resp] }]
+      - set: [xch.defer, 1]
       - call: [g_api.generic_get, xch]
       - call: [g_lock.release]
+      - call: [send_tracked, xch]
 
 - def:
     name: on_sso_login
@@ -275,35 +356,43 @@
     body:
       - call: [g_lock.acquire]
       - decl: [xch, ptr<kontor.http.Exchange>, { call: [wrap, req, resp] }]
+      - set: [xch.defer, 1]
       - call: [g_api.v2_read, xch]
       - call: [g_lock.release]
+      - call: [send_tracked, xch]
 
 - def:
     name: on_v2_post
     args: [[req, http_request_handle], [resp, http_response_handle]]
     body:
+      - decl: [tid, i64, { call: [track_upload, req] }]
       - call: [g_lock.acquire]
       - decl: [xch, ptr<kontor.http.Exchange>, { call: [wrap, req, resp] }]
       - call: [g_api.v2_post, xch]
       - call: [g_lock.release]
+      - call: [untrack, tid]
 
 - def:
     name: on_v2_patch
     args: [[req, http_request_handle], [resp, http_response_handle]]
     body:
+      - decl: [tid, i64, { call: [track_upload, req] }]
       - call: [g_lock.acquire]
       - decl: [xch, ptr<kontor.http.Exchange>, { call: [wrap, req, resp] }]
       - call: [g_api.v2_patch, xch]
       - call: [g_lock.release]
+      - call: [untrack, tid]
 
 - def:
     name: on_v2_put
     args: [[req, http_request_handle], [resp, http_response_handle]]
     body:
+      - decl: [tid, i64, { call: [track_upload, req] }]
       - call: [g_lock.acquire]
       - decl: [xch, ptr<kontor.http.Exchange>, { call: [wrap, req, resp] }]
       - call: [g_api.v2_put, xch]
       - call: [g_lock.release]
+      - call: [untrack, tid]
 
 - def:
     name: on_v2_delete
@@ -703,6 +792,8 @@
       - call: [srv.route, "PUT", "/api/v1/generic/*", on_generic_put]
       - call: [srv.route, "GET", "/api/v1/generic/*", on_generic_get]
       - call: [srv.route, "GET", "/api/v1/whoami", on_whoami]
+      - call: [srv.route, "GET", "/api/transfers", on_transfers]
+      - call: [srv.route, "GET", "/api/v1/transfers", on_transfers]
       - call: [srv.route, "GET", "/api/v1/sso/saml/login", on_sso_login]
       - call: [srv.route, "POST", "/api/v1/sso/saml/acs", on_sso_acs]
       - call: [srv.route, "POST", "/api/v1/tokens", on_token_create]

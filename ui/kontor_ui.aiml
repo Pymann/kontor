@@ -172,6 +172,10 @@
       - [preview, list<string>, [], { access: public }]
       - [runs, list<string>, [], { access: public }]
       - [settings, string, "", { access: public }]
+      # running uploads and downloads (transfers.md TR-30), polled
+      - [activity, string, "", { access: public }]
+      - [activity_lines, list<string>, [], { access: public }]
+      - [polled_ms, i64, 0, { access: public }]
       # what a button asked for, run by perform() after the frame
       - [todo, string, "", { access: public }]
       - [todo_arg, string, "", { access: public }]
@@ -332,6 +336,59 @@
                       - call: [<.projects.push, name]
                       - set: [idx, { +: [idx, 1] }]
                 - call: [yaml.free, doc]
+
+          # GET /api/v1/transfers → the header's summary and one line per
+          # running transfer (transfers.md TR-30).  Quiet on errors: a poll
+          # must not overwrite the message line.
+          - def:
+              name: load_transfers
+              body:
+                - decl: [text, string, { call: [<.api.call, "GET", "/api/v1/transfers", ""] }]
+                - call: [<.activity_lines.clear]
+                - if:
+                    condition: { neq: [<.api.status, 200] }
+                    then:
+                      - set: [<.activity, ""]
+                      - return: []
+                - decl: [doc, ptr<yaml_doc>, { call: [yaml.parse, text] }]
+                - decl: [root, ptr<yaml_node>, { call: [yaml.root, doc] }]
+                - decl: [ups, string, { call: [yaml.scalar, { call: [yaml.get, root, "uploads"] }] }]
+                - decl: [downs, string, { call: [yaml.scalar, { call: [yaml.get, root, "downloads"] }] }]
+                - decl: [seq, ref<yaml_node>, { call: [yaml.get, root, "transfers"] }]
+                - decl: [count, i32, { call: [yaml.size, seq] }]
+                - if:
+                    condition: { eq: [count, 0] }
+                    then:
+                      - set: [<.activity, "Idle: no uploads or downloads"]
+                    else:
+                      - set: [<.activity, "Active: ${ups} uploading, ${downs} downloading"]
+                - decl: [idx, i32, 0]
+                - while:
+                    condition: { lt: [idx, count] }
+                    body:
+                      - decl: [item, ref<yaml_node>, { call: [yaml.item, seq, idx] }]
+                      - decl: [way, string, { call: [yaml.scalar, { call: [yaml.get, item, "direction"] }] }]
+                      - decl: [phase, string, { call: [yaml.scalar, { call: [yaml.get, item, "phase"] }] }]
+                      - decl: [where, string, { call: [yaml.scalar, { call: [yaml.get, item, "path"] }] }]
+                      - decl: [who, string, { call: [yaml.scalar, { call: [yaml.get, item, "user"] }] }]
+                      - decl: [size_text, string, { call: [yaml.scalar, { call: [yaml.get, item, "bytes"] }] }]
+                      - decl: [size, i64, size_text]
+                      - if: { condition: { or: [{ eq: [where.len, 0] }, { eq: [where, "null"] }] }, then: [{ set: [where, "(body still arriving)"] }] }
+                      - decl: [line, string, "${way} ${where}, ${{ call: [ui_bytes, size] }}, ${phase}"]
+                      - if: { condition: { and: [{ gt: [who.len, 0] }, { neq: [who, "null"] }] }, then: [{ set: [line, "${line}, by ${who}"] }] }
+                      - call: [<.activity_lines.push, line]
+                      - set: [idx, { +: [idx, 1] }]
+                - call: [yaml.free, doc]
+
+          # Polls the transfers every 3 s while the caller may read.
+          - def:
+              name: poll
+              args: [[now_ms, i64]]
+              body:
+                - if: { condition: { eq: [{ call: [<.can, "read"] }, 0] }, then: [{ return: [] }] }
+                - if: { condition: { lt: [{ -: [now_ms, <.polled_ms] }, 3000] }, then: [{ return: [] }] }
+                - set: [<.polled_ms, now_ms]
+                - call: [<.load_transfers]
 
           # Versions of one project and its install command (FW-31).
           - def:
@@ -678,6 +735,11 @@
                       - if: { condition: { eq: [{ call: [ui.button, "Retention"] }, 1] }, then: [{ call: [<.store.ask, "go", "2"] }] }
                       - call: [ui.same_line]
                       - if: { condition: { eq: [{ call: [ui.button, "Settings"] }, 1] }, then: [{ call: [<.store.ask, "go", "3"] }] }
+                - if:
+                    condition: { gt: [<.store.activity.len, 0] }
+                    then:
+                      - call: [ui.same_line]
+                      - call: [ui.label, "   ${<.store.activity}"]
                 - call: [ui.end_cell]
                 - call: [ui.set_align, "right", "middle"]
                 - call: [ui.begin_cell, 2, 0, 1, 1]
@@ -723,6 +785,17 @@
                 - call: [ui.set_scroll, "y"]
                 - call: [ui.begin_cell, 0, 0, 1, 1]
                 - call: [ui.label, "${<.store.totals}"]
+                - if:
+                    condition: { gt: [<.store.activity_lines.len, 0] }
+                    then:
+                      - call: [ui.separator]
+                      - call: [ui.label, "running transfers"]
+                      - decl: [tidx, i32, 0]
+                      - while:
+                          condition: { lt: [tidx, <.store.activity_lines.len] }
+                          body:
+                            - call: [ui.label, { call: [<.store.activity_lines.get, tidx] }]
+                            - set: [tidx, { +: [tidx, 1] }]
                 - call: [ui.separator]
                 - call: [ui.label, "exodus projects"]
                 - decl: [idx, i32, 0]
@@ -937,5 +1010,6 @@
                       # (aiml doc/wasm_frame_loop.md: a yield mid-frame
                       # would show a half-drawn canvas).
                       - call: [<.store.perform]
+                      - call: [<.store.poll, { call: [time.now] }]
                       - if: { condition: { eq: [web, 1] }, then: [{ call: [time.sleep_ms, 16] }] }
                 - return: [0]

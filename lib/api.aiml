@@ -21,6 +21,7 @@
 - import: "auth.aiml"
 - import: "oci.aiml"
 - import: "hooks.aiml"
+- import: "transfers.aiml"
 
 # Media types of a cosmos run-layers artifact (contract §3).
 - def:
@@ -42,6 +43,7 @@
       - [house, ptr<kontor.housekeeping.Housekeeping>, null, { access: public }]
       - [public_url, string, "", { access: public }]
       - [settings, ptr<kontor.settings.Settings>, null, { access: public }]
+      - [transfers, ptr<kontor.transfers.TransferBoard>, null, { access: public }]
     methods:
       # The UI directory: the first of `candidates` that exists (FW-11).
       - def:
@@ -105,6 +107,9 @@
                   - set: [<.public_url, set_new.public_url]
                   - set: [<.hooks.public_url, set_new.public_url]
             - set: [<.settings, set_new]
+            - decl: [board_new, ptr<kontor.transfers.TransferBoard>, { new: kontor.transfers.TransferBoard }]
+            - call: [board_new.init, "${data_dir}/tmp/spool"]
+            - set: [<.transfers, board_new]
             - call: [<.reload_graph]
             - if:
                 condition: { eq: [loaded, 0] }
@@ -135,6 +140,7 @@
             - if:
                 condition: { and: [{ eq: [who.valid, 1] }, { eq: [{ call: [<.acl.allows, who.roles, action] }, 1] }] }
                 then:
+                  - set: [xch.user, who.name]
                   - return: [who]
             - decl: [status, i32, 403]
             - decl: [code, string, "DENIED"]
@@ -666,6 +672,17 @@
           args: [[xch, ref<kontor.http.Exchange>]]
           body:
             - call: [xch.json, 200, "{\"status\":\"ok\"}"]
+
+      # GET /api/v1/transfers — running uploads and downloads
+      # (doc/spec/transfers.md).  The read right, like the catalog.
+      - def:
+          name: transfers_view
+          args: [[xch, ref<kontor.http.Exchange>]]
+          body:
+            - decl: [who, kontor.auth.Principal, { call: [<.authorize, xch, "read"] }]
+            - if: { condition: { eq: [who.valid, 0] }, then: [{ return: [] }] }
+            - call: [xch.set_header, "cache-control", "no-store"]
+            - call: [xch.json, 200, { call: [<.transfers.status_json] }]
 
       # ── identity: whoami, tokens, users ────────────────────────────────────
 
