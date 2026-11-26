@@ -1,0 +1,43 @@
+# kontor.generic — the generic repository's request body handling.
+#
+# The HTTP runtime spools every body to <data>/tmp/spool (srv.set_spool);
+# store_body moves that file (rename, no copy) and adopts it as a blob, so an
+# upload needs its own size on disk once, not twice.  A full disk while the
+# runtime is still spooling ends in 507 Insufficient Storage before any
+# handler runs.
+
+- namespace: kontor.generic
+
+- import: "store.aiml"
+- import: "exchange.aiml"
+
+# Stores the request body as a blob (streamed via a temp file).  Returns
+# the sha256 or "" (an error was sent).  Checks X-Checksum-Sha256.
+- def:
+    name: store_body
+    args: [[data_dir, string], [xch, ref<kontor.http.Exchange>]]
+    return: string
+    body:
+      - decl: [tmp, string, { call: [kontor.store.temp_path, data_dir, "upload"] }]
+      - if:
+          condition: { neq: [{ call: [xch.body_to_file, tmp] }, 0] }
+          then:
+            - call: [xch.error, 500, "could not store upload"]
+            - return: [""]
+      - decl: [expected, string, { call: [xch.header, "x-checksum-sha256"] }]
+      - if:
+          condition: { gt: [expected.len, 0] }
+          then:
+            - decl: [actual, string, { call: [hash.sha256_file, tmp] }]
+            - if:
+                condition: { neq: [{ call: [expected.lower] }, actual] }
+                then:
+                  - call: [io.remove, tmp]
+                  - call: [xch.error, 400, "checksum mismatch: body sha256 is ${actual}"]
+                  - return: [""]
+      - decl: [stored, string, { call: [kontor.store.put_blob_file, data_dir, tmp] }]
+      - if:
+          condition: { eq: [stored.len, 0] }
+          then:
+            - call: [xch.error, 500, "could not store blob"]
+      - return: [stored]

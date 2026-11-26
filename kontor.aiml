@@ -187,6 +187,15 @@
       - call: [untrack, tid]
 
 - def:
+    name: on_generic_delete
+    args: [[req, http_request_handle], [resp, http_response_handle]]
+    body:
+      - call: [g_lock.acquire]
+      - decl: [xch, ptr<kontor.http.Exchange>, { call: [wrap, req, resp] }]
+      - call: [g_api.generic_delete, xch]
+      - call: [g_lock.release]
+
+- def:
     name: on_generic_get
     args: [[req, http_request_handle], [resp, http_response_handle]]
     body:
@@ -772,7 +781,11 @@
       - call: [srv.set_max_body, 1073741824]
       # Every body is spooled to a file (registry blobs can be large); 10 GiB cap.
       - call: [srv.set_spool, "${data_dir}/tmp/spool", 1, 10737418240]
-      - call: [srv.set_timeout, 120]
+      # The runtime's timeout is both per recv and a total deadline for reading
+      # the whole request, body included: with 120 s a 182 MB upload needed
+      # 1.5 MB/s or ended in "400 Bad Request".  900 s takes 182 MB at
+      # 0.2 MB/s and 1 GiB at 1.2 MB/s.
+      - call: [srv.set_timeout, 900]
       - call: [srv.route, "GET", "/api/health", on_health]
       - call: [srv.route, "GET", "/api/v1/health", on_health]
       - call: [srv.route, "GET", "/api/graph", on_graph]
@@ -785,12 +798,14 @@
       - call: [srv.route, "GET", "/exodus/:name/:version/package", on_package_get]
       - call: [srv.route, "PUT", "/generic/*", on_generic_put]
       - call: [srv.route, "GET", "/generic/*", on_generic_get]
+      - call: [srv.route, "DELETE", "/generic/*", on_generic_delete]
       - call: [srv.route, "PUT", "/api/v1/exodus/:name/:version/exodus.json", on_manifest_put]
       - call: [srv.route, "GET", "/api/v1/exodus/:name/:version/exodus.json", on_manifest_get]
       - call: [srv.route, "PUT", "/api/v1/exodus/:name/:version/package", on_package_put]
       - call: [srv.route, "GET", "/api/v1/exodus/:name/:version/package", on_package_get]
       - call: [srv.route, "PUT", "/api/v1/generic/*", on_generic_put]
       - call: [srv.route, "GET", "/api/v1/generic/*", on_generic_get]
+      - call: [srv.route, "DELETE", "/api/v1/generic/*", on_generic_delete]
       - call: [srv.route, "GET", "/api/v1/whoami", on_whoami]
       - call: [srv.route, "GET", "/api/transfers", on_transfers]
       - call: [srv.route, "GET", "/api/v1/transfers", on_transfers]

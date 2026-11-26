@@ -83,6 +83,7 @@ exists under `/api/v1/…`; `/generic/…` and `/exodus/…` have `/api/v1/` ali
 | PUT/GET | `/generic/<path>` | write/read | Upload / download any file. Optional `X-Checksum-Sha256` header is verified on upload. Downloads support `Range`. Emits `artifact.published`. |
 | PUT/GET | `/exodus/<name>/<version>/exodus.json` | write/read | Project manifest. Name and version must match the URL. Emits `manifest.published`. Once the version's package is there, `409`. |
 | PUT/GET | `/exodus/<name>/<version>/package` | write/read | Build output (any bytes). Upload answers with the rebuild plan and emits `package.published`. A published version is not overwritten: a second upload is `409`. |
+| DELETE | `/generic/<path>` | delete | Deletes a file; its blob is freed at once when nothing else refers to it. Protected files are kept (`409`). Emits `artifact.deleted`. Old files go automatically with a `repo: generic` retention rule (`max_age_days`). |
 | GET | `/generic/<dir>/` | read | Lists a directory (trailing slash), like `/api/v1/list/generic?prefix=<dir>`. A `404` on a download names the directory to list (`"list"`). |
 | GET | `/api/v1/list/generic` | read | Files below `prefix`: `recursive=1`, `match=<glob>` (`*`, `?`, `**`), `sort=path\|published`, `limit`/`offset`. See [Finding what is there](#finding-what-is-there). |
 | GET | `/api/v1/list/exodus` | read | Projects with newest version and version count. |
@@ -184,7 +185,11 @@ with `n`/`last` pagination and `Link`. Pushing a manifest emits `image.pushed`.
 Blobs live in the same `cas/` as generic files and packages. Request bodies
 are spooled to `data/tmp/spool` by the server, never held in memory; an
 upload session grows by appending the spooled chunk to its file.
-Limits: 10 GiB per request body, 4 MiB per manifest, 120 s idle timeout.
+Limits: 10 GiB per request body, 4 MiB per manifest, 900 s to read a whole
+request (the body included; a slower upload gets `400 Bad Request`). An upload
+needs its own size free on disk once: the spooled file is renamed into `cas/`,
+not copied. With the disk full while the body is still arriving the answer is
+`507 Insufficient Storage` (plain text, before any handler runs).
 
 ### Webhooks
 

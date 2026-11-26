@@ -88,6 +88,10 @@
                 condition: { lt: [idx, lines.len] }
                 body:
                   - decl: [line, string, { call: [lines.get, idx] }]
+                  # read_text trims the file, so a generic entry on the last
+                  # line loses its empty version field: put it back.
+                  - decl: [fields, list<string>, { call: [line.split, "\t"] }]
+                  - if: { condition: { eq: [fields.len, 2] }, then: [{ set: [line, "${line}\t"] }] }
                   - if: { condition: { gt: [line.len, 0] }, then: [{ call: [out.push, line] }] }
                   - set: [idx, { +: [idx, 1] }]
             - return: [out]
@@ -242,6 +246,63 @@
             - call: [io.remove, "${gdir}/meta.json"]
             - decl: [inner, list<string>, { call: [kontor.store.list_subdirs, gdir] }]
             - if: { condition: { eq: [inner.len, 0] }, then: [{ call: [io.remove_all, gdir] }] }
+            # Parent directories the artifact leaves empty go too (not generic/ itself).
+            - decl: [parts, list<string>, { call: [rel.split, "/"] }]
+            - decl: [depth, i32, { -: [parts.len, 1] }]
+            - while:
+                condition: { gt: [depth, 0] }
+                body:
+                  - decl: [rest, string, { call: [parts.get, 0] }]
+                  - decl: [pidx, i32, 1]
+                  - while:
+                      condition: { lt: [pidx, depth] }
+                      body:
+                        - set: [rest, "${rest}/${{ call: [parts.get, pidx] }}"]
+                        - set: [pidx, { +: [pidx, 1] }]
+                  - decl: [pdir, string, "${<.data_dir}/generic/${rest}"]
+                  - decl: [psubs, list<string>, { call: [kontor.store.list_subdirs, pdir] }]
+                  - decl: [pfiles, list<string>, { call: [kontor.store.list_files, pdir] }]
+                  - if:
+                      condition: { or: [{ gt: [psubs.len, 0] }, { gt: [pfiles.len, 0] }] }
+                      then:
+                        - set: [depth, 0]
+                      else:
+                        - call: [io.remove_all, pdir]
+                        - set: [depth, { -: [depth, 1] }]
+
+      # DELETE /generic/<rel>: "" when the file went (its blob too, when
+      # nothing else refers to it), "missing", or why it is kept ("protected").
+      - def:
+          name: delete_generic
+          args: [[rel, string], [actor, string], [graph, ref<kontor.graph.DependencyGraph>], [catalog, ref<kontor.catalog.Catalog>]]
+          return: string
+          body:
+            - decl: [digest, string, { call: [kontor.store.read_text, "${<.data_dir}/generic/${rel}/blob.sha256"] }]
+            - if: { condition: { eq: [digest.len, 0] }, then: [{ return: ["missing"] }] }
+            - decl: [planner, ptr<kontor.retention.Planner>, { call: [<.planner_for, "", graph, catalog] }]
+            - decl: [reason, string, { call: [planner.guard, "generic", rel, ""] }]
+            - if: { condition: { and: [{ gt: [reason.len, 0] }, { neq: [reason, "missing"] }] }, then: [{ return: [reason] }] }
+            - call: [<.drop_generic, rel]
+            - decl: [freed, i64, { call: [<.free_blob, digest] }]
+            - call: [log.info, "generic ${rel} deleted by ${actor} (${freed} blob bytes freed)"]
+            - return: [""]
+
+      # Removes the blob `digest` right away when nothing refers to it any more
+      # (a manual delete wants its space back now, not after the sweep's
+      # grace period).  Returns the bytes freed.
+      - def:
+          name: free_blob
+          args: [[digest, string]]
+          return: i64
+          body:
+            - if: { condition: { neq: [digest.len, 64] }, then: [{ return: [0] }] }
+            - decl: [refs, map<string:i32>, { call: [<.referenced] }]
+            - if: { condition: { eq: [{ call: [refs.contains, digest] }, 1] }, then: [{ return: [0] }] }
+            - decl: [bpath, string, { call: [kontor.store.blob_path, <.data_dir, digest] }]
+            - if: { condition: { not: [{ call: [io.exists, bpath] }] }, then: [{ return: [0] }] }
+            - decl: [freed, i64, { call: [io.file_size, bpath] }]
+            - call: [io.remove, bpath]
+            - return: [freed]
 
       - def:
           name: tombstoned

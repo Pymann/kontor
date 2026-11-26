@@ -80,6 +80,26 @@ cmp -s "$WORK/blob.bin" "$WORK/alias.bin" && pass "alias bytes identical" || fai
 check "missing artifact" "$(status "$BASE/generic/nope/x.bin")" "404"
 check "path traversal rejected" "$(status --path-as-is "$BASE/generic/a/../../etc/passwd")" "400"
 
+echo "generic delete"
+check "anonymous delete -> 401" "$(anon -X DELETE "$BASE/generic/mirror/blob.bin")" "401"
+check "delete missing -> 404" "$(status -X DELETE "$BASE/generic/nope/x.bin")" "404"
+check "delete one of two paths" "$(status -X DELETE "$BASE/generic/mirror/blob.bin")" "204"
+check "deleted path -> 404" "$(status "$BASE/generic/mirror/blob.bin")" "404"
+check "empty parent removed" "$([ -e "$DATA/generic/mirror" ] && echo kept || echo gone)" "gone"
+check "shared blob kept" "$(find "$DATA/cas" -type f -size +1M | wc -l | tr -d ' ')" "1"
+check "other path still served" "$(OUT=/dev/null status "$BASE/generic/tools/blob/1.0/blob.bin")" "200"
+printf 'probe' > "$WORK/probe.txt"
+check "upload nested probe" "$(status -X PUT --data-binary @"$WORK/probe.txt" "$BASE/generic/ci/probe-diagnose/klein.txt")" "201"
+PROBE_SHA=$(sha256sum "$WORK/probe.txt" | cut -d' ' -f1)
+check "protect probe" "$(status -X PUT "$BASE/api/v1/protected?repo=generic&name=ci/probe-diagnose/klein.txt")" "204"
+check "protected -> 409" "$(status -X DELETE "$BASE/generic/ci/probe-diagnose/klein.txt")" "409"
+check "unprotect probe" "$(status -X DELETE "$BASE/api/v1/protected?repo=generic&name=ci/probe-diagnose/klein.txt")" "204"
+check "delete via /api/v1 alias" "$(status -X DELETE "$BASE/api/v1/generic/ci/probe-diagnose/klein.txt")" "204"
+check "probe dir removed, ci/ kept" "$([ -e "$DATA/generic/ci/probe-diagnose" ] && echo kept || echo gone) $([ -d "$DATA/generic/ci/one.bin" ] && echo kept || echo gone)" "gone kept"
+check "unshared blob freed" "$(ls "$DATA/cas/${PROBE_SHA:0:2}/$PROBE_SHA" 2>/dev/null | wc -l | tr -d ' ')" "0"
+check "path writable again" "$(status -X PUT --data-binary @"$WORK/probe.txt" "$BASE/generic/ci/probe-diagnose/klein.txt")" "201"
+check "and deletable" "$(status -X DELETE "$BASE/generic/ci/probe-diagnose/klein.txt")" "204"
+
 echo "exodus repository"
 put_manifest() { status -X PUT --data-binary @"$1" "$BASE/exodus/$2/$3/exodus.json"; }
 for f in tests/fixtures/*.exodus.json; do

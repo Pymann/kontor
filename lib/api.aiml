@@ -22,6 +22,7 @@
 - import: "oci.aiml"
 - import: "hooks.aiml"
 - import: "transfers.aiml"
+- import: "generic.aiml"
 
 # Media types of a cosmos run-layers artifact (contract §3).
 - def:
@@ -207,37 +208,6 @@
                   - return: [""]
             - return: [rel]
 
-      # Stores the request body as a blob (streamed via a temp file).  Returns
-      # the sha256 or "" (an error was sent).  Checks X-Checksum-Sha256.
-      - def:
-          name: store_body
-          args: [[xch, ref<kontor.http.Exchange>]]
-          return: string
-          body:
-            - decl: [tmp, string, { call: [kontor.store.temp_path, <.data_dir, "upload"] }]
-            - if:
-                condition: { neq: [{ call: [xch.body_to_file, tmp] }, 0] }
-                then:
-                  - call: [xch.error, 500, "could not store upload"]
-                  - return: [""]
-            - decl: [expected, string, { call: [xch.header, "x-checksum-sha256"] }]
-            - if:
-                condition: { gt: [expected.len, 0] }
-                then:
-                  - decl: [actual, string, { call: [hash.sha256_file, tmp] }]
-                  - if:
-                      condition: { neq: [{ call: [expected.lower] }, actual] }
-                      then:
-                        - call: [io.remove, tmp]
-                        - call: [xch.error, 400, "checksum mismatch: body sha256 is ${actual}"]
-                        - return: [""]
-            - decl: [stored, string, { call: [kontor.store.put_blob_file, <.data_dir, tmp] }]
-            - if:
-                condition: { eq: [stored.len, 0] }
-                then:
-                  - call: [xch.error, 500, "could not store blob"]
-            - return: [stored]
-
       - def:
           name: generic_put
           args: [[xch, ref<kontor.http.Exchange>]]
@@ -247,7 +217,7 @@
             - decl: [rel, string, { call: [<.generic_path, xch] }]
             - if: { condition: { eq: [rel.len, 0] }, then: [{ return: [] }] }
             - decl: [size, i64, { call: [xch.body_len] }]
-            - decl: [stored, string, { call: [<.store_body, xch] }]
+            - decl: [stored, string, { call: [kontor.generic.store_body, <.data_dir, xch] }]
             - if: { condition: { eq: [stored.len, 0] }, then: [{ return: [] }] }
             - call: [kontor.store.write_text, <.data_dir, "${<.data_dir}/generic/${rel}", "blob.sha256", stored]
             - call: [<.catalog.stamp, "${<.data_dir}/generic/${rel}", who.name, 0]
@@ -256,6 +226,23 @@
             - decl: [data, string, "{\"path\":${rel_json},\"sha256\":\"${stored}\",\"size\":${size}}"]
             - call: [<.hooks.emit, "artifact.published", data]
             - call: [xch.json, 201, data]
+
+      # DELETE /generic/<path> (housekeeping.delete_generic).
+      - def:
+          name: generic_delete
+          args: [[xch, ref<kontor.http.Exchange>]]
+          body:
+            - decl: [who, kontor.auth.Principal, { call: [<.authorize, xch, "delete"] }]
+            - if: { condition: { eq: [who.valid, 0] }, then: [{ return: [] }] }
+            - decl: [rel, string, { call: [<.generic_path, xch] }]
+            - if: { condition: { eq: [rel.len, 0] }, then: [{ return: [] }] }
+            - decl: [snapshot, ref<kontor.graph.DependencyGraph>, <.graph]
+            - decl: [cat, ref<kontor.catalog.Catalog>, <.catalog]
+            - decl: [kept, string, { call: [<.house.delete_generic, rel, who.name, snapshot, cat] }]
+            - if: { condition: { eq: [kept, "missing"] }, then: [{ call: [xch.error, 404, "not found"] }, { return: [] }] }
+            - if: { condition: { gt: [kept.len, 0] }, then: [{ call: [xch.error, 409, "${rel} is kept: ${kept}"] }, { return: [] }] }
+            - call: [<.hooks.emit, "artifact.deleted", "{\"repo\":\"generic\",\"name\":${{ call: [kontor.text.json_str, rel] }},\"version\":\"\",\"reason\":\"manual\"}"]
+            - call: [xch.empty, 204]
 
       - def:
           name: send_blob
@@ -592,7 +579,7 @@
                   - call: [xch.error, 409, "upload exodus.json for ${name}@${version} first"]
                   - return: []
             - decl: [size, i64, { call: [xch.body_len] }]
-            - decl: [digest, string, { call: [<.store_body, xch] }]
+            - decl: [digest, string, { call: [kontor.generic.store_body, <.data_dir, xch] }]
             - if: { condition: { eq: [digest.len, 0] }, then: [{ return: [] }] }
             - call: [kontor.store.write_text, <.data_dir, dir, "package.sha256", digest]
             - call: [<.catalog.stamp, dir, who.name, { call: [<.is_tool_archive, digest] }]
