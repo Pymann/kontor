@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>kontor</title>
+<link rel="icon" href="data:,">
+<style>
+  html, body { margin: 0; height: 100%; background: #f7f7fa; overflow: hidden; }
+  #canvas { display: block; width: 100vw; height: 100vh; outline: none; }
+  #status { position: fixed; top: 45%; width: 100%; text-align: center;
+            font: 15px system-ui, sans-serif; color: #555; }
+</style>
+</head>
+<body>
+<canvas id="canvas" tabindex="0"></canvas>
+<div id="status">Loading kontor…</div>
+<!-- The CSP (web_ui.md FW-14) allows no inline script: Module lives in boot.js. -->
+<script src="boot.js"></script>
+<script src="kontor-ui.js"></script>
+</body>
+</html>

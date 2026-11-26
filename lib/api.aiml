@@ -14,6 +14,10 @@
 - import: "store.aiml"
 - import: "graph.aiml"
 - import: "exchange.aiml"
+- import: "webui.aiml"
+- import: "catalog.aiml"
+- import: "housekeeping.aiml"
+- import: "settings.aiml"
 - import: "auth.aiml"
 - import: "oci.aiml"
 - import: "hooks.aiml"
@@ -33,7 +37,35 @@
       - [acl, ptr<kontor.auth.AccessControl>, null, { access: public }]
       - [registry, ptr<kontor.oci.Registry>, null, { access: public }]
       - [hooks, ptr<kontor.hooks.WebhookHub>, null, { access: public }]
+      - [web_ui, ptr<kontor.webui.StaticUi>, null, { access: public }]
+      - [catalog, ptr<kontor.catalog.Catalog>, null, { access: public }]
+      - [house, ptr<kontor.housekeeping.Housekeeping>, null, { access: public }]
+      - [public_url, string, "", { access: public }]
+      - [settings, ptr<kontor.settings.Settings>, null, { access: public }]
     methods:
+      # The UI directory: the first of `candidates` that exists (FW-11).
+      - def:
+          name: setup_ui
+          args: [[candidates, list<string>]]
+          body:
+            - decl: [ui_new, ptr<kontor.webui.StaticUi>, { new: kontor.webui.StaticUi }]
+            - call: [ui_new.setup, candidates]
+            - set: [<.web_ui, ui_new]
+
+      # GET /, /ui, /ui/… (FW-10).
+      - def:
+          name: ui_get
+          static_off: ["str_cmp"]
+          args: [[xch, ref<kontor.http.Exchange>]]
+          body:
+            - decl: [full, string, { call: [xch.path] }]
+            - if:
+                condition: { or: [{ eq: [full, "/"] }, { eq: [full, "/ui"] }] }
+                then:
+                  - call: [xch.redirect, "/ui/"]
+                  - return: []
+            - call: [<.web_ui.serve, xch, { call: [full.substr, 4] }]
+
       # Creates the components for `data_dir` and reads <data>/kontor.yaml.
       # Returns "" or a configuration error.
       - def:
@@ -54,6 +86,25 @@
             - set: [hub_new.data_dir, data_dir]
             - set: [hub_new.public_url, public_url]
             - set: [<.hooks, hub_new]
+            - set: [<.public_url, public_url]
+            - decl: [cat_new, ptr<kontor.catalog.Catalog>, { new: kontor.catalog.Catalog }]
+            - set: [cat_new.data_dir, data_dir]
+            - set: [<.catalog, cat_new]
+            - decl: [house_new, ptr<kontor.housekeeping.Housekeeping>, { new: kontor.housekeeping.Housekeeping }]
+            - set: [house_new.data_dir, data_dir]
+            - set: [<.house, house_new]
+            - decl: [set_new, ptr<kontor.settings.Settings>, { new: kontor.settings.Settings }]
+            - set: [set_new.data_dir, data_dir]
+            - call: [set_new.load]
+            - decl: [no_roles, list<string>, []]
+            - decl: [acl_now, ref<kontor.auth.AccessControl>, <.acl]
+            - call: [set_new.apply, acl_now, no_roles]
+            - if:
+                condition: { gt: [set_new.public_url.len, 0] }
+                then:
+                  - set: [<.public_url, set_new.public_url]
+                  - set: [<.hooks.public_url, set_new.public_url]
+            - set: [<.settings, set_new]
             - call: [<.reload_graph]
             - if:
                 condition: { eq: [loaded, 0] }
@@ -193,6 +244,7 @@
             - decl: [stored, string, { call: [<.store_body, xch] }]
             - if: { condition: { eq: [stored.len, 0] }, then: [{ return: [] }] }
             - call: [kontor.store.write_text, <.data_dir, "${<.data_dir}/generic/${rel}", "blob.sha256", stored]
+            - call: [<.catalog.stamp, "${<.data_dir}/generic/${rel}", who.name, 0]
             - call: [log.info, "generic PUT ${rel} (${size} bytes, ${stored}) by ${who.name}"]
             - decl: [rel_json, string, { call: [kontor.text.json_str, rel] }]
             - decl: [data, string, "{\"path\":${rel_json},\"sha256\":\"${stored}\",\"size\":${size}}"]
@@ -216,6 +268,24 @@
           name: generic_get
           args: [[xch, ref<kontor.http.Exchange>]]
           body:
+            # FL-04: a directory URL (trailing slash) lists itself.
+            - decl: [full, string, { call: [xch.path] }]
+            - if:
+                condition: { eq: [{ call: [full.ends_with, "/"] }, 1] }
+                then:
+                  - decl: [cut, i32, 9]
+                  - if:
+                      condition: { eq: [{ call: [full.starts_with, "/api/v1/generic/"] }, 1] }
+                      then:
+                        - set: [cut, 16]
+                  - decl: [dir_rel, string, ""]
+                  - decl: [dir_len, i32, { -: [full.len, { +: [cut, 1] }] }]
+                  - if:
+                      condition: { gt: [dir_len, 0] }
+                      then:
+                        - set: [dir_rel, { call: [full.substr, cut, dir_len] }]
+                  - call: [<.list_generic, xch, dir_rel]
+                  - return: []
             - decl: [who, kontor.auth.Principal, { call: [<.authorize, xch, "read"] }]
             - if: { condition: { eq: [who.valid, 0] }, then: [{ return: [] }] }
             - decl: [rel, string, { call: [<.generic_path, xch] }]
@@ -224,9 +294,177 @@
             - if:
                 condition: { eq: [digest.len, 0] }
                 then:
-                  - call: [xch.error, 404, "not found"]
+                  # FL-05: name the deepest existing directory to list.
+                  - decl: [segs, list<string>, { call: [rel.split, "/"] }]
+                  - decl: [known, string, ""]
+                  - decl: [sidx, i32, 0]
+                  - decl: [walking, i32, 1]
+                  - while:
+                      condition: { and: [{ eq: [walking, 1] }, { lt: [sidx, { -: [segs.len, 1] }] }] }
+                      body:
+                        - decl: [cand, string, { call: [segs.get, sidx] }]
+                        - if: { condition: { gt: [known.len, 0] }, then: [{ set: [cand, "${known}/${cand}"] }] }
+                        - decl: [cand_dir, string, "${<.data_dir}/generic/${cand}"]
+                        - decl: [is_dir, i32, 0]
+                        - if: { condition: { call: [io.exists, cand_dir] }, then: [{ set: [is_dir, 1] }] }
+                        - if: { condition: { call: [io.exists, "${cand_dir}/blob.sha256"] }, then: [{ set: [is_dir, 0] }] }
+                        - if:
+                            condition: { eq: [is_dir, 1] }
+                            then:
+                              - set: [known, cand]
+                              - set: [sidx, { +: [sidx, 1] }]
+                            else:
+                              - set: [walking, 0]
+                  - decl: [hint, string, { call: [kontor.text.json_str, "/api/v1/list/generic?prefix=${known}"] }]
+                  - call: [xch.json, 404, "{\"error\":\"not found\",\"code\":\"not_found\",\"list\":${hint}}"]
                   - return: []
             - call: [<.send_blob, xch, digest]
+
+      # ── listing (doc/spec/listing.md) ──────────────────────────────────────
+
+      # A non-negative integer query parameter, `fallback` when absent, -1
+      # when it is not a number (FL-02).
+      - def:
+          name: int_param
+          args: [[xch, ref<kontor.http.Exchange>], [key, string], [fallback, i32]]
+          return: i32
+          body:
+            - decl: [raw, string, { call: [xch.query, key] }]
+            - if: { condition: { eq: [raw.len, 0] }, then: [{ return: [fallback] }] }
+            - if:
+                condition: { or: [{ eq: [{ call: [kontor.retention.all_digits, raw] }, 0] }, { gt: [raw.len, 9] }] }
+                then:
+                  - return: [-1]
+            - decl: [wide, i64, raw]
+            - decl: [num, i32, wide]
+            - return: [num]
+
+      # limit (default 1000, capped at 10000), or -1 after a 400 (FL-02).
+      - def:
+          name: list_limit
+          args: [[xch, ref<kontor.http.Exchange>]]
+          return: i32
+          body:
+            - decl: [limit, i32, { call: [<.int_param, xch, "limit", 1000] }]
+            - if: { condition: { gt: [limit, 10000] }, then: [{ set: [limit, 10000] }] }
+            - decl: [offset, i32, { call: [<.int_param, xch, "offset", 0] }]
+            - if:
+                condition: { or: [{ lt: [limit, 0] }, { lt: [offset, 0] }] }
+                then:
+                  - call: [xch.error, 400, "limit and offset are non-negative integers"]
+                  - return: [-1]
+            - return: [limit]
+
+      # GET /api/v1/list/generic and GET /generic/<dir>/ (FL-01…FL-04).
+      - def:
+          name: list_generic
+          static_off: ["str_cmp"]
+          args: [[xch, ref<kontor.http.Exchange>], [prefix, string]]
+          body:
+            - decl: [who, kontor.auth.Principal, { call: [<.authorize, xch, "read"] }]
+            - if: { condition: { eq: [who.valid, 0] }, then: [{ return: [] }] }
+            - if:
+                condition: { and: [{ gt: [prefix.len, 0] }, { eq: [{ call: [kontor.text.safe_rel_path, prefix] }, 0] }] }
+                then:
+                  - call: [xch.error, 400, "invalid prefix"]
+                  - return: []
+            - decl: [match, string, { call: [xch.query, "match"] }]
+            - if:
+                condition: { and: [{ gt: [match.len, 0] }, { eq: [{ call: [kontor.text.safe_rel_path, match] }, 0] }] }
+                then:
+                  - call: [xch.error, 400, "invalid match"]
+                  - return: []
+            - decl: [recursive, i32, 0]
+            - decl: [rec_flag, string, { call: [xch.query, "recursive"] }]
+            - if: { condition: { eq: [rec_flag, "1"] }, then: [{ set: [recursive, 1] }] }
+            - if: { condition: { ge: [{ call: [match.index_of, "/"] }, 0] }, then: [{ set: [recursive, 1] }] }
+            - if: { condition: { ge: [{ call: [match.index_of, "**"] }, 0] }, then: [{ set: [recursive, 1] }] }
+            - decl: [sort_by, string, { call: [xch.query, "sort"] }]
+            - decl: [by_published, i32, 0]
+            - if:
+                condition: { eq: [sort_by, "published"] }
+                then:
+                  - set: [by_published, 1]
+                else:
+                  - if:
+                      condition: { and: [{ gt: [sort_by.len, 0] }, { neq: [sort_by, "path"] }] }
+                      then:
+                        - call: [xch.error, 400, "sort is path or published"]
+                        - return: []
+            - decl: [limit, i32, { call: [<.list_limit, xch] }]
+            - if: { condition: { lt: [limit, 0] }, then: [{ return: [] }] }
+            - decl: [offset, i32, { call: [<.int_param, xch, "offset", 0] }]
+            - if:
+                condition: { gt: [prefix.len, 0] }
+                then:
+                  - decl: [pdir, string, "${<.data_dir}/generic/${prefix}"]
+                  - decl: [listable, i32, 0]
+                  - if: { condition: { call: [io.exists, pdir] }, then: [{ set: [listable, 1] }] }
+                  - if:
+                      condition: { call: [io.exists, "${pdir}/blob.sha256"] }
+                      then:
+                        - decl: [below, list<string>, { call: [kontor.store.list_subdirs, pdir] }]
+                        - if: { condition: { eq: [below.len, 0] }, then: [{ set: [listable, 0] }] }
+                  - if:
+                      condition: { eq: [listable, 0] }
+                      then:
+                        - call: [xch.error, 404, "no such directory"]
+                        - return: []
+            - decl: [ask, kontor.catalog.ListQuery]
+            - set: [ask.prefix, prefix]
+            - set: [ask.match, match]
+            - set: [ask.recursive, recursive]
+            - set: [ask.by_published, by_published]
+            - set: [ask.limit, limit]
+            - set: [ask.offset, offset]
+            - call: [xch.json, 200, { call: [<.catalog.list_generic_json, ask] }]
+
+      - def:
+          name: list_generic_query
+          args: [[xch, ref<kontor.http.Exchange>]]
+          body:
+            - call: [<.list_generic, xch, { call: [xch.query, "prefix"] }]
+
+      # GET /api/v1/list/exodus (FL-10).
+      - def:
+          name: list_exodus
+          args: [[xch, ref<kontor.http.Exchange>]]
+          body:
+            - decl: [who, kontor.auth.Principal, { call: [<.authorize, xch, "read"] }]
+            - if: { condition: { eq: [who.valid, 0] }, then: [{ return: [] }] }
+            - call: [xch.json, 200, { call: [<.catalog.list_exodus_json] }]
+
+      # GET /api/v1/list/exodus/<name> (FL-11).
+      - def:
+          name: list_versions
+          args: [[xch, ref<kontor.http.Exchange>]]
+          body:
+            - decl: [who, kontor.auth.Principal, { call: [<.authorize, xch, "read"] }]
+            - if: { condition: { eq: [who.valid, 0] }, then: [{ return: [] }] }
+            - decl: [name, string, { call: [xch.param, "name"] }]
+            - decl: [match, string, { call: [xch.query, "match"] }]
+            - decl: [bad_name, i32, 0]
+            - if: { condition: { eq: [{ call: [kontor.text.safe_segment, name] }, 0] }, then: [{ set: [bad_name, 1] }] }
+            - decl: [bad_match, i32, 0]
+            - if:
+                condition: { and: [{ gt: [match.len, 0] }, { eq: [{ call: [kontor.text.safe_segment, match] }, 0] }] }
+                then:
+                  - set: [bad_match, 1]
+            - if:
+                condition: { or: [{ eq: [bad_name, 1] }, { eq: [bad_match, 1] }] }
+                then:
+                  - call: [xch.error, 400, "invalid project name or match"]
+                  - return: []
+            - decl: [limit, i32, { call: [<.list_limit, xch] }]
+            - if: { condition: { lt: [limit, 0] }, then: [{ return: [] }] }
+            - decl: [offset, i32, { call: [<.int_param, xch, "offset", 0] }]
+            - decl: [body, string, { call: [<.catalog.list_versions_json, name, match, limit, offset] }]
+            - if:
+                condition: { eq: [body.len, 0] }
+                then:
+                  - call: [xch.error, 404, "unknown project"]
+                  - return: []
+            - call: [xch.json, 200, body]
 
       # ── exodus repository ──────────────────────────────────────────────────
 
@@ -257,10 +495,13 @@
             - if: { condition: { eq: [dir.len, 0] }, then: [{ return: [] }] }
             - decl: [name, string, { call: [xch.param, "name"] }]
             - decl: [version, string, { call: [xch.param, "version"] }]
+            # FW-47a: only the admin right overwrites a published version or
+            # brings a deleted one back.
+            - decl: [taken, bool, { or: [{ call: [io.exists, "${dir}/package.sha256"] }, { call: [io.exists, "${dir}/tombstone.json"] }] }]
             - if:
-                condition: { call: [io.exists, "${dir}/package.sha256"] }
+                condition: { and: [taken, { eq: [{ call: [<.acl.allows, who.roles, "admin"] }, 0] }] }
                 then:
-                  - call: [xch.error, 409, "${name}@${version} is published; a version is not overwritten, publish a new one"]
+                  - call: [xch.error, 409, "${name}@${version} is published (or was, and is deleted); a version is not overwritten, publish a new one"]
                   - return: []
             - decl: [text, string, { call: [xch.text] }]
             - if:
@@ -290,6 +531,8 @@
                   - call: [xch.error, 400, "manifest says ${m_name}@${m_version}, URL says ${name}@${version}"]
                   - return: []
             - call: [kontor.store.write_text, <.data_dir, dir, "exodus.json", text]
+            - call: [io.remove, "${dir}/tombstone.json"]
+            - call: [<.catalog.stamp, dir, who.name, 0]
             - call: [<.reload_graph]
             - call: [log.info, "exodus manifest ${name}@${version} (${dep_count} deps, ${apt_count} apt) by ${who.name}"]
             - decl: [name_json, string, { call: [kontor.text.json_str, name] }]
@@ -305,6 +548,11 @@
             - if: { condition: { eq: [who.valid, 0] }, then: [{ return: [] }] }
             - decl: [dir, string, { call: [<.project_dir, xch] }]
             - if: { condition: { eq: [dir.len, 0] }, then: [{ return: [] }] }
+            - if:
+                condition: { call: [io.exists, "${dir}/tombstone.json"] }
+                then:
+                  - call: [<.gone, xch]
+                  - return: []
             - if:
                 condition: { not: [{ call: [io.exists, "${dir}/exodus.json"] }] }
                 then:
@@ -324,10 +572,13 @@
             - if: { condition: { eq: [dir.len, 0] }, then: [{ return: [] }] }
             - decl: [name, string, { call: [xch.param, "name"] }]
             - decl: [version, string, { call: [xch.param, "version"] }]
+            # FW-47a: only the admin right overwrites a published version or
+            # brings a deleted one back.
+            - decl: [taken, bool, { or: [{ call: [io.exists, "${dir}/package.sha256"] }, { call: [io.exists, "${dir}/tombstone.json"] }] }]
             - if:
-                condition: { call: [io.exists, "${dir}/package.sha256"] }
+                condition: { and: [taken, { eq: [{ call: [<.acl.allows, who.roles, "admin"] }, 0] }] }
                 then:
-                  - call: [xch.error, 409, "${name}@${version} is published; a version is not overwritten, publish a new one"]
+                  - call: [xch.error, 409, "${name}@${version} is published (or was, and is deleted); a version is not overwritten, publish a new one"]
                   - return: []
             - if:
                 condition: { not: [{ call: [io.exists, "${dir}/exodus.json"] }] }
@@ -338,6 +589,7 @@
             - decl: [digest, string, { call: [<.store_body, xch] }]
             - if: { condition: { eq: [digest.len, 0] }, then: [{ return: [] }] }
             - call: [kontor.store.write_text, <.data_dir, dir, "package.sha256", digest]
+            - call: [<.catalog.stamp, dir, who.name, { call: [<.is_tool_archive, digest] }]
             - decl: [previous, string, { call: [kontor.graph.previous_package_digest, <.data_dir, name, version] }]
             - decl: [unchanged, string, "false"]
             - decl: [impact, string, "null"]
@@ -363,6 +615,11 @@
             - if: { condition: { eq: [who.valid, 0] }, then: [{ return: [] }] }
             - decl: [dir, string, { call: [<.project_dir, xch] }]
             - if: { condition: { eq: [dir.len, 0] }, then: [{ return: [] }] }
+            - if:
+                condition: { call: [io.exists, "${dir}/tombstone.json"] }
+                then:
+                  - call: [<.gone, xch]
+                  - return: []
             - decl: [digest, string, { call: [kontor.store.read_text, "${dir}/package.sha256"] }]
             - if:
                 condition: { eq: [digest.len, 0] }
@@ -423,7 +680,21 @@
                   - call: [xch.set_header, "www-authenticate", "Basic realm=\"kontor\""]
                   - call: [xch.error, 401, "authentication required"]
                   - return: []
-            - call: [xch.json, 200, "{\"name\":${{ call: [kontor.text.json_str, who.name] }},\"kind\":\"${who.kind}\",\"roles\":${{ call: [kontor.auth.csv_json, who.roles] }}}"]
+            # FW-25: the rights the roles grant, so a client shows what it may use.
+            - decl: [actions, list<string>, ["read", "write", "delete", "admin", "webhook_admin"]]
+            - decl: [granted, string, ""]
+            - decl: [aidx, i32, 0]
+            - while:
+                condition: { lt: [aidx, actions.len] }
+                body:
+                  - decl: [action, string, { call: [actions.get, aidx] }]
+                  - if:
+                      condition: { eq: [{ call: [<.acl.allows, who.roles, action] }, 1] }
+                      then:
+                        - if: { condition: { gt: [granted.len, 0] }, then: [{ set: [granted, "${granted},"] }] }
+                        - set: [granted, "${granted}\"${action}\""]
+                  - set: [aidx, { +: [aidx, 1] }]
+            - call: [xch.json, 200, "{\"name\":${{ call: [kontor.text.json_str, who.name] }},\"kind\":\"${who.kind}\",\"roles\":${{ call: [kontor.auth.csv_json, who.roles] }},\"rights\":[${granted}]}"]
 
       # ── SAML single sign-on (contract §6) ─────────────────────────────────
       # GET /api/v1/sso/saml/login?relay=/path → 302 to the IdP.
@@ -472,7 +743,7 @@
                   - call: [xch.error, 401, "saml: NameID is not a valid kontor user name"]
                   - return: []
             - decl: [who, kontor.auth.Principal, { call: [<.acl.external_principal, ident] }]
-            - decl: [minted, string, { call: [<.acl.create_session_token, who.name, who.roles, <.acl.idp.saml_session_hours] }]
+            - decl: [minted, string, { call: [<.acl.create_session_token, who.name, who.roles, <.acl.idp.saml_session_hours, "saml session"] }]
             - call: [log.info, "saml login ${who.name} (roles ${who.roles})"]
             - decl: [local, i32, 0]
             - if:
@@ -492,6 +763,63 @@
             - decl: [tok_id, string, { call: [minted.substr, 0, colon] }]
             - decl: [secret, string, { call: [minted.substr, { +: [colon, 1] }] }]
             - call: [xch.json, 200, "{\"name\":${{ call: [kontor.text.json_str, who.name] }},\"roles\":${{ call: [kontor.auth.csv_json, who.roles] }},\"id\":\"${tok_id}\",\"token\":\"${secret}\"}"]
+
+      # POST /api/v1/sessions with HTTP Basic user:password → a session token
+      # (web_ui.md FW-20).  A token is not a login: Bearer, or a token as the
+      # Basic password, is 400.
+      - def:
+          name: session_create
+          args: [[xch, ref<kontor.http.Exchange>]]
+          body:
+            - decl: [authorization, string, { call: [xch.header, "authorization"] }]
+            - decl: [lowered, string, { call: [authorization.lower] }]
+            - if:
+                condition: { eq: [{ call: [lowered.starts_with, "bearer "] }, 1] }
+                then:
+                  - call: [xch.error, 400, "a session is made from a login (user name and password), not from a token"]
+                  - return: []
+            - if:
+                condition: { eq: [{ call: [lowered.starts_with, "basic "] }, 0] }
+                then:
+                  - call: [xch.set_header, "www-authenticate", "Basic realm=\"kontor\""]
+                  - call: [xch.error, 401, "user name and password required"]
+                  - return: []
+            - decl: [cred, string, { call: [authorization.substr, 6] }]
+            - decl: [pair, string, { call: [base64.decode_str, { call: [cred.trim] }] }]
+            - decl: [colon, i32, -1]
+            - if:
+                condition: { neq: [pair, null] }
+                then:
+                  - set: [colon, { call: [pair.index_of, ":"] }]
+            - if:
+                condition: { le: [colon, 0] }
+                then:
+                  - call: [xch.error, 401, "wrong user name or password"]
+                  - return: []
+            - decl: [user, string, { call: [pair.substr, 0, colon] }]
+            - decl: [secret, string, { call: [pair.substr, { +: [colon, 1] }] }]
+            - decl: [by_token, kontor.auth.Principal, { call: [<.acl.check_token, secret, ""] }]
+            - if:
+                condition: { eq: [by_token.valid, 1] }
+                then:
+                  - call: [xch.error, 400, "a session is made from a login (user name and password), not from a token"]
+                  - return: []
+            - decl: [who, kontor.auth.Principal, { call: [<.acl.authenticate, authorization] }]
+            - if:
+                condition: { or: [{ eq: [who.valid, 0] }, { neq: [who.kind, "user"] }] }
+                then:
+                  - call: [xch.error, 401, "wrong user name or password"]
+                  - return: []
+            - decl: [hours, i32, <.acl.session_hours]
+            - decl: [minted, string, { call: [<.acl.create_session_token, who.name, who.roles, hours, "ui session"] }]
+            - decl: [mcolon, i32, { call: [minted.index_of, ":"] }]
+            - decl: [tok_id, string, { call: [minted.substr, 0, mcolon] }]
+            - decl: [tok_secret, string, { call: [minted.substr, { +: [mcolon, 1] }] }]
+            - decl: [now_ms, i64, { call: [time.now] }]
+            - decl: [life_ms, i64, { '*': [hours, 3600000] }]
+            - decl: [until_ms, i64, { +: [now_ms, life_ms] }]
+            - call: [log.info, "session for ${who.name}"]
+            - call: [xch.json, 201, "{\"id\":\"${tok_id}\",\"owner\":${{ call: [kontor.text.json_str, who.name] }},\"roles\":${{ call: [kontor.auth.csv_json, who.roles] }},\"token\":\"${tok_secret}\",\"expires_ms\":${until_ms}}"]
 
       # Body field as comma list: JSON array or comma string.
       - def:
@@ -601,6 +929,11 @@
             - decl: [password, string, { call: [yaml.scalar, { call: [yaml.get, root, "password"] }] }]
             - decl: [roles_csv, string, { call: [<.body_csv, root, "roles"] }]
             - call: [yaml.free, doc]
+            - if:
+                condition: { and: [{ eq: [{ call: [<.is_admin_user, name] }, 1] }, { eq: [{ call: [<.acl.allows, roles_csv, "admin"] }, 0] }, { eq: [{ call: [<.other_admins, name] }, 0] }] }
+                then:
+                  - call: [xch.error, 409, "${name} is the last user with the admin right"]
+                  - return: []
             - decl: [problem, string, { call: [<.acl.put_user, name, password, roles_csv] }]
             - if:
                 condition: { gt: [problem.len, 0] }
@@ -624,12 +957,373 @@
           body:
             - decl: [who, kontor.auth.Principal, { call: [<.authorize, xch, "admin"] }]
             - if: { condition: { eq: [who.valid, 0] }, then: [{ return: [] }] }
+            - decl: [target, string, { call: [xch.param, "name"] }]
             - if:
-                condition: { eq: [{ call: [<.acl.delete_user, { call: [xch.param, "name"] }] }, 0] }
+                condition: { and: [{ eq: [{ call: [<.is_admin_user, target] }, 1] }, { eq: [{ call: [<.other_admins, target] }, 0] }] }
+                then:
+                  - call: [xch.error, 409, "${target} is the last user with the admin right"]
+                  - return: []
+            - if:
+                condition: { eq: [{ call: [<.acl.delete_user, target] }, 0] }
                 then:
                   - call: [xch.error, 404, "no such user"]
                   - return: []
             - call: [xch.empty, 204]
+
+      # ── web UI backend: catalog, retention, protection (web_ui.md §4, §5) ──
+
+      - def:
+          name: gone
+          args: [[xch, ref<kontor.http.Exchange>]]
+          body:
+            - decl: [msg_json, string, { call: [kontor.text.json_str, "this version was deleted"] }]
+            - call: [xch.json, 410, "{\"error\":${msg_json},\"code\":\"gone\"}"]
+
+      # 1 when the package is an archive with an aiml.tool.json at the root of
+      # its one directory (aiml spec/68 F68-54) — `aiml venv install` can
+      # install it.
+      - def:
+          name: is_tool_archive
+          args: [[digest, string]]
+          return: i32
+          body:
+            - decl: [scratch, string, { call: [kontor.store.temp_path, <.data_dir, "tool-probe"] }]
+            - call: [io.mkdir_all, scratch]
+            - decl: [untar_rc, i32, { call: [compress.untar, { call: [kontor.store.blob_path, <.data_dir, digest] }, scratch] }]
+            - decl: [tool, i32, 0]
+            - if:
+                condition: { eq: [untar_rc, 0] }
+                then:
+                  - decl: [hits, list<string>, { call: [io.glob, "${scratch}/*/aiml.tool.json"] }]
+                  - if: { condition: { gt: [hits.len, 0] }, then: [{ set: [tool, 1] }] }
+            - call: [io.remove_all, scratch]
+            - return: [tool]
+
+      - def:
+          name: catalog_view
+          args: [[xch, ref<kontor.http.Exchange>]]
+          body:
+            - decl: [who, kontor.auth.Principal, { call: [<.authorize, xch, "read"] }]
+            - if: { condition: { eq: [who.valid, 0] }, then: [{ return: [] }] }
+            - decl: [snapshot, ref<kontor.graph.DependencyGraph>, <.graph]
+            - call: [xch.json, 200, { call: [<.catalog.summary_json, snapshot, <.public_url] }]
+
+      - def:
+          name: catalog_project
+          args: [[xch, ref<kontor.http.Exchange>]]
+          body:
+            - decl: [who, kontor.auth.Principal, { call: [<.authorize, xch, "read"] }]
+            - if: { condition: { eq: [who.valid, 0] }, then: [{ return: [] }] }
+            - decl: [name, string, { call: [xch.param, "name"] }]
+            - if:
+                condition: { eq: [{ call: [kontor.text.safe_segment, name] }, 0] }
+                then:
+                  - call: [xch.error, 400, "invalid project name"]
+                  - return: []
+            - decl: [snapshot, ref<kontor.graph.DependencyGraph>, <.graph]
+            - decl: [body, string, { call: [<.catalog.project_json, snapshot, name, { call: [<.house.protected] }, <.public_url] }]
+            - if:
+                condition: { eq: [body.len, 0] }
+                then:
+                  - call: [xch.error, 404, "no such project"]
+                  - return: []
+            - call: [xch.json, 200, body]
+
+      - def:
+          name: catalog_generic
+          args: [[xch, ref<kontor.http.Exchange>]]
+          body:
+            - decl: [who, kontor.auth.Principal, { call: [<.authorize, xch, "read"] }]
+            - if: { condition: { eq: [who.valid, 0] }, then: [{ return: [] }] }
+            - decl: [prefix, string, { call: [xch.query, "prefix"] }]
+            - if:
+                condition: { and: [{ gt: [prefix.len, 0] }, { eq: [{ call: [kontor.text.safe_rel_path, prefix] }, 0] }] }
+                then:
+                  - call: [xch.error, 400, "invalid prefix"]
+                  - return: []
+            - call: [xch.json, 200, { call: [<.catalog.generic_json, prefix] }]
+
+      - def:
+          name: retention_get
+          args: [[xch, ref<kontor.http.Exchange>]]
+          body:
+            - decl: [who, kontor.auth.Principal, { call: [<.authorize, xch, "admin"] }]
+            - if: { condition: { eq: [who.valid, 0] }, then: [{ return: [] }] }
+            - call: [xch.json, 200, { call: [<.house.policy_json] }]
+
+      - def:
+          name: retention_put
+          args: [[xch, ref<kontor.http.Exchange>]]
+          body:
+            - decl: [who, kontor.auth.Principal, { call: [<.authorize, xch, "admin"] }]
+            - if: { condition: { eq: [who.valid, 0] }, then: [{ return: [] }] }
+            - decl: [problem, string, { call: [<.house.save_policy, { call: [xch.text] }] }]
+            - if:
+                condition: { gt: [problem.len, 0] }
+                then:
+                  - call: [xch.error, 400, problem]
+                  - return: []
+            - call: [log.info, "retention policy stored by ${who.name}"]
+            - call: [xch.json, 200, { call: [<.house.policy_json] }]
+
+      # POST /api/v1/retention/preview, optional body = a policy to try (FW-44).
+      - def:
+          name: retention_preview
+          args: [[xch, ref<kontor.http.Exchange>]]
+          body:
+            - decl: [who, kontor.auth.Principal, { call: [<.authorize, xch, "admin"] }]
+            - if: { condition: { eq: [who.valid, 0] }, then: [{ return: [] }] }
+            - decl: [text, string, { call: [xch.text] }]
+            - if:
+                condition: { eq: [{ call: [text.trim] }, ""] }
+                then:
+                  - set: [text, { call: [<.house.policy_text] }]
+            - decl: [probe, ptr<kontor.retention.Planner>, { new: kontor.retention.Planner }]
+            - decl: [problem, string, { call: [probe.set_policy, text] }]
+            - if:
+                condition: { gt: [problem.len, 0] }
+                then:
+                  - call: [xch.error, 400, problem]
+                  - return: []
+            - decl: [snapshot, ref<kontor.graph.DependencyGraph>, <.graph]
+            - decl: [cat, ref<kontor.catalog.Catalog>, <.catalog]
+            - decl: [planner, ptr<kontor.retention.Planner>, { call: [<.house.planner_for, text, snapshot, cat] }]
+            - call: [xch.json, 200, { call: [planner.plan_json, { call: [time.now] }] }]
+
+      # One retention run over the stored policy (FW-45…FW-49); returns the
+      # run id.  Runs inside the caller's hold of the server lock.
+      - def:
+          name: run_retention
+          args: [[actor, string], [trigger, string]]
+          return: string
+          body:
+            - decl: [started, i64, { call: [time.now] }]
+            - decl: [run_id, string, { call: [<.house.new_run_id, started] }]
+            - decl: [snapshot, ref<kontor.graph.DependencyGraph>, <.graph]
+            - decl: [cat, ref<kontor.catalog.Catalog>, <.catalog]
+            - decl: [planner, ptr<kontor.retention.Planner>, { call: [<.house.planner_for, { call: [<.house.policy_text] }, snapshot, cat] }]
+            - decl: [doomed, list<string>, { call: [planner.plan_lines, started] }]
+            - decl: [bytes, i64, 0]
+            - decl: [graph_changed, i32, 0]
+            - decl: [idx, i32, 0]
+            - while:
+                condition: { lt: [idx, doomed.len] }
+                body:
+                  - decl: [line, string, { call: [doomed.get, idx] }]
+                  - decl: [fields, list<string>, { call: [line.split, "\t"] }]
+                  - decl: [repo, string, { call: [fields.get, 0] }]
+                  - decl: [name, string, { call: [fields.get, 1] }]
+                  - decl: [version, string, { call: [fields.get, 2] }]
+                  - decl: [size, i64, { call: [fields.get, 3] }]
+                  - set: [bytes, { +: [bytes, size] }]
+                  - if:
+                      condition: { eq: [repo, "exodus"] }
+                      then:
+                        - call: [<.house.bury, name, version, actor, "retention"]
+                        - set: [graph_changed, 1]
+                      else:
+                        - call: [<.house.drop_generic, name]
+                  - call: [<.hooks.emit, "artifact.deleted", "{\"repo\":${{ call: [kontor.text.json_str, repo] }},\"name\":${{ call: [kontor.text.json_str, name] }},\"version\":${{ call: [kontor.text.json_str, version] }},\"reason\":\"retention\"}"]
+                  - set: [idx, { +: [idx, 1] }]
+            - if: { condition: { eq: [graph_changed, 1] }, then: [{ call: [<.reload_graph] }] }
+            - decl: [swept, i64, { call: [<.house.sweep, started] }]
+            - decl: [sessions, i32, { call: [<.house.sweep_sessions, started] }]
+            - decl: [finished, i64, { call: [time.now] }]
+            - call: [<.house.log_run, run_id, "{\"run\":\"${run_id}\",\"started_ms\":${started},\"finished_ms\":${finished},\"trigger\":${{ call: [kontor.text.json_str, trigger] }},\"by\":${{ call: [kontor.text.json_str, actor] }},\"deleted\":${doomed.len},\"bytes_freed\":${bytes},\"blob_bytes_swept\":${swept},\"sessions_swept\":${sessions},\"errors\":[]}"]
+            - call: [log.info, "retention run ${run_id} (${trigger}, ${actor}): ${doomed.len} deleted, ${bytes} bytes, ${swept} blob bytes swept, ${sessions} sessions"]
+            - return: [run_id]
+
+      - def:
+          name: retention_run
+          args: [[xch, ref<kontor.http.Exchange>]]
+          body:
+            - decl: [who, kontor.auth.Principal, { call: [<.authorize, xch, "admin"] }]
+            - if: { condition: { eq: [who.valid, 0] }, then: [{ return: [] }] }
+            - decl: [run_id, string, { call: [<.run_retention, who.name, "manual"] }]
+            - call: [xch.json, 202, "{\"run\":\"${run_id}\"}"]
+
+      - def:
+          name: retention_runs
+          args: [[xch, ref<kontor.http.Exchange>]]
+          body:
+            - decl: [who, kontor.auth.Principal, { call: [<.authorize, xch, "admin"] }]
+            - if: { condition: { eq: [who.valid, 0] }, then: [{ return: [] }] }
+            - call: [xch.json, 200, { call: [<.house.runs_json] }]
+
+      # Called by the scheduler thread under the lock: a scheduled run when due.
+      - def:
+          name: retention_tick
+          body:
+            - if:
+                condition: { eq: [{ call: [<.house.schedule_due, { call: [time.now] }] }, 1] }
+                then:
+                  - call: [<.run_retention, "schedule", "schedule"]
+
+      # "repo\tname\tversion" from the query, or "" (an error was sent).
+      - def:
+          name: protected_entry
+          static_off: ["str_cmp"]
+          args: [[xch, ref<kontor.http.Exchange>]]
+          return: string
+          body:
+            - decl: [repo, string, { call: [xch.query, "repo"] }]
+            - decl: [name, string, { call: [xch.query, "name"] }]
+            - decl: [version, string, { call: [xch.query, "version"] }]
+            - decl: [valid_entry, i32, 0]
+            - if:
+                condition: { and: [{ eq: [repo, "generic"] }, { eq: [{ call: [kontor.text.safe_rel_path, name] }, 1] }, { eq: [version.len, 0] }] }
+                then:
+                  - set: [valid_entry, 1]
+            - if:
+                condition: { and: [{ neq: [repo, "generic"] }, { or: [{ eq: [repo, "exodus"] }, { eq: [repo, "oci"] }] }, { gt: [name.len, 0] }, { gt: [version.len, 0] }, { lt: [{ call: [name.index_of, "\t"] }, 0] }, { lt: [{ call: [version.index_of, "\t"] }, 0] }] }
+                then:
+                  - set: [valid_entry, 1]
+            - if:
+                condition: { eq: [valid_entry, 0] }
+                then:
+                  - call: [xch.error, 400, "pass ?repo=exodus|generic|oci&name=<name>&version=<version> (no version for generic)"]
+                  - return: [""]
+            - return: ["${repo}\t${name}\t${version}"]
+
+      - def:
+          name: protected_list
+          args: [[xch, ref<kontor.http.Exchange>]]
+          body:
+            - decl: [who, kontor.auth.Principal, { call: [<.authorize, xch, "admin"] }]
+            - if: { condition: { eq: [who.valid, 0] }, then: [{ return: [] }] }
+            - call: [xch.json, 200, { call: [<.house.protected_json] }]
+
+      - def:
+          name: protected_put
+          args: [[xch, ref<kontor.http.Exchange>]]
+          body:
+            - decl: [who, kontor.auth.Principal, { call: [<.authorize, xch, "admin"] }]
+            - if: { condition: { eq: [who.valid, 0] }, then: [{ return: [] }] }
+            - decl: [entry, string, { call: [<.protected_entry, xch] }]
+            - if: { condition: { eq: [entry.len, 0] }, then: [{ return: [] }] }
+            - call: [<.house.set_protected, entry, 1]
+            - call: [xch.empty, 204]
+
+      - def:
+          name: protected_delete
+          args: [[xch, ref<kontor.http.Exchange>]]
+          body:
+            - decl: [who, kontor.auth.Principal, { call: [<.authorize, xch, "admin"] }]
+            - if: { condition: { eq: [who.valid, 0] }, then: [{ return: [] }] }
+            - decl: [entry, string, { call: [<.protected_entry, xch] }]
+            - if: { condition: { eq: [entry.len, 0] }, then: [{ return: [] }] }
+            - call: [<.house.set_protected, entry, 0]
+            - call: [xch.empty, 204]
+
+      # DELETE /exodus/<name>/<version> (FW-50).
+      - def:
+          name: exodus_delete
+          args: [[xch, ref<kontor.http.Exchange>]]
+          body:
+            - decl: [who, kontor.auth.Principal, { call: [<.authorize, xch, "delete"] }]
+            - if: { condition: { eq: [who.valid, 0] }, then: [{ return: [] }] }
+            - decl: [dir, string, { call: [<.project_dir, xch] }]
+            - if: { condition: { eq: [dir.len, 0] }, then: [{ return: [] }] }
+            - decl: [name, string, { call: [xch.param, "name"] }]
+            - decl: [version, string, { call: [xch.param, "version"] }]
+            - if:
+                condition: { call: [io.exists, "${dir}/tombstone.json"] }
+                then:
+                  - call: [<.gone, xch]
+                  - return: []
+            - decl: [snapshot, ref<kontor.graph.DependencyGraph>, <.graph]
+            - decl: [cat, ref<kontor.catalog.Catalog>, <.catalog]
+            - decl: [planner, ptr<kontor.retention.Planner>, { call: [<.house.planner_for, "", snapshot, cat] }]
+            - decl: [reason, string, { call: [planner.guard, "exodus", name, version] }]
+            - if:
+                condition: { eq: [reason, "missing"] }
+                then:
+                  - call: [xch.error, 404, "not found"]
+                  - return: []
+            - if:
+                condition: { gt: [reason.len, 0] }
+                then:
+                  - call: [xch.error, 409, "${name}@${version} is kept: ${reason}"]
+                  - return: []
+            - call: [<.house.bury, name, version, who.name, "manual"]
+            - call: [<.reload_graph]
+            - call: [<.hooks.emit, "artifact.deleted", "{\"repo\":\"exodus\",\"name\":${{ call: [kontor.text.json_str, name] }},\"version\":${{ call: [kontor.text.json_str, version] }},\"reason\":\"manual\"}"]
+            - call: [log.info, "exodus ${name}@${version} deleted by ${who.name}"]
+            - call: [xch.empty, 204]
+
+      # ── settings (web_ui.md §6) ──────────────────────────────────────────
+
+      # 1 when local user `name` exists and has the admin right.
+      - def:
+          name: is_admin_user
+          args: [[name, string]]
+          return: i32
+          body:
+            - if:
+                condition: { eq: [{ call: [kontor.auth.valid_name, name] }, 0] }
+                then:
+                  - return: [0]
+            - decl: [upath, string, { call: [<.acl.user_path, name] }]
+            - if:
+                condition: { not: [{ call: [io.exists, upath] }] }
+                then:
+                  - return: [0]
+            - decl: [doc, ptr<yaml_doc>, { call: [yaml.parse_file, upath] }]
+            - decl: [csv, string, { call: [kontor.auth.seq_csv, { call: [yaml.get, { call: [yaml.root, doc] }, "roles"] }] }]
+            - call: [yaml.free, doc]
+            - return: [{ call: [<.acl.allows, csv, "admin"] }]
+
+      # Local users with the admin right other than `name` (FW-62; the
+      # bootstrap token is no user).
+      - def:
+          name: other_admins
+          args: [[name, string]]
+          return: i32
+          body:
+            - decl: [names, list<string>, { call: [kontor.store.list_files, "${<.data_dir}/auth/users"] }]
+            - decl: [count, i32, 0]
+            - decl: [idx, i32, 0]
+            - while:
+                condition: { lt: [idx, names.len] }
+                body:
+                  - decl: [other, string, { call: [names.get, idx] }]
+                  - if:
+                      condition: { and: [{ neq: [other, name] }, { eq: [{ call: [<.is_admin_user, other] }, 1] }] }
+                      then:
+                        - set: [count, { +: [count, 1] }]
+                  - set: [idx, { +: [idx, 1] }]
+            - return: [count]
+
+      - def:
+          name: settings_get
+          args: [[xch, ref<kontor.http.Exchange>]]
+          body:
+            - decl: [who, kontor.auth.Principal, { call: [<.authorize, xch, "admin"] }]
+            - if: { condition: { eq: [who.valid, 0] }, then: [{ return: [] }] }
+            - decl: [acl_now, ref<kontor.auth.AccessControl>, <.acl]
+            - call: [xch.json, 200, { call: [<.settings.view_json, acl_now, <.public_url] }]
+
+      - def:
+          name: settings_put
+          args: [[xch, ref<kontor.http.Exchange>]]
+          body:
+            - decl: [who, kontor.auth.Principal, { call: [<.authorize, xch, "admin"] }]
+            - if: { condition: { eq: [who.valid, 0] }, then: [{ return: [] }] }
+            - decl: [acl_now, ref<kontor.auth.AccessControl>, <.acl]
+            - decl: [problem, string, { call: [<.settings.update, { call: [xch.text] }, acl_now] }]
+            - if:
+                condition: { gt: [problem.len, 0] }
+                then:
+                  - decl: [code, i32, { call: [problem.substr, 0, 3] }]
+                  - call: [xch.error, code, { call: [problem.substr, 4] }]
+                  - return: []
+            - if:
+                condition: { gt: [<.settings.public_url.len, 0] }
+                then:
+                  - set: [<.public_url, <.settings.public_url]
+                  - set: [<.hooks.public_url, <.settings.public_url]
+            - call: [log.info, "settings changed by ${who.name}"]
+            - call: [xch.json, 200, { call: [<.settings.view_json, acl_now, <.public_url] }]
 
       # ── webhooks ───────────────────────────────────────────────────────────
 

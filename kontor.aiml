@@ -315,6 +315,191 @@
       - call: [g_lock.release]
 
 - def:
+    name: on_ui
+    args: [[req, http_request_handle], [resp, http_response_handle]]
+    body:
+      - call: [g_lock.acquire]
+      - decl: [xch, ptr<kontor.http.Exchange>, { call: [wrap, req, resp] }]
+      - call: [g_api.ui_get, xch]
+      - call: [g_lock.release]
+
+- def:
+    name: on_session_create
+    args: [[req, http_request_handle], [resp, http_response_handle]]
+    body:
+      - call: [g_lock.acquire]
+      - decl: [xch, ptr<kontor.http.Exchange>, { call: [wrap, req, resp] }]
+      - call: [g_api.session_create, xch]
+      - call: [g_lock.release]
+
+- def:
+    name: on_catalog
+    args: [[req, http_request_handle], [resp, http_response_handle]]
+    body:
+      - call: [g_lock.acquire]
+      - decl: [xch, ptr<kontor.http.Exchange>, { call: [wrap, req, resp] }]
+      - call: [g_api.catalog_view, xch]
+      - call: [g_lock.release]
+
+- def:
+    name: on_catalog_project
+    args: [[req, http_request_handle], [resp, http_response_handle]]
+    body:
+      - call: [g_lock.acquire]
+      - decl: [xch, ptr<kontor.http.Exchange>, { call: [wrap, req, resp] }]
+      - call: [g_api.catalog_project, xch]
+      - call: [g_lock.release]
+
+- def:
+    name: on_list_generic
+    args: [[req, http_request_handle], [resp, http_response_handle]]
+    body:
+      - call: [g_lock.acquire]
+      - decl: [xch, ptr<kontor.http.Exchange>, { call: [wrap, req, resp] }]
+      - call: [g_api.list_generic_query, xch]
+      - call: [g_lock.release]
+
+- def:
+    name: on_list_exodus
+    args: [[req, http_request_handle], [resp, http_response_handle]]
+    body:
+      - call: [g_lock.acquire]
+      - decl: [xch, ptr<kontor.http.Exchange>, { call: [wrap, req, resp] }]
+      - call: [g_api.list_exodus, xch]
+      - call: [g_lock.release]
+
+- def:
+    name: on_list_versions
+    args: [[req, http_request_handle], [resp, http_response_handle]]
+    body:
+      - call: [g_lock.acquire]
+      - decl: [xch, ptr<kontor.http.Exchange>, { call: [wrap, req, resp] }]
+      - call: [g_api.list_versions, xch]
+      - call: [g_lock.release]
+
+- def:
+    name: on_catalog_generic
+    args: [[req, http_request_handle], [resp, http_response_handle]]
+    body:
+      - call: [g_lock.acquire]
+      - decl: [xch, ptr<kontor.http.Exchange>, { call: [wrap, req, resp] }]
+      - call: [g_api.catalog_generic, xch]
+      - call: [g_lock.release]
+
+- def:
+    name: on_retention_get
+    args: [[req, http_request_handle], [resp, http_response_handle]]
+    body:
+      - call: [g_lock.acquire]
+      - decl: [xch, ptr<kontor.http.Exchange>, { call: [wrap, req, resp] }]
+      - call: [g_api.retention_get, xch]
+      - call: [g_lock.release]
+
+- def:
+    name: on_retention_put
+    args: [[req, http_request_handle], [resp, http_response_handle]]
+    body:
+      - call: [g_lock.acquire]
+      - decl: [xch, ptr<kontor.http.Exchange>, { call: [wrap, req, resp] }]
+      - call: [g_api.retention_put, xch]
+      - call: [g_lock.release]
+
+- def:
+    name: on_retention_preview
+    args: [[req, http_request_handle], [resp, http_response_handle]]
+    body:
+      - call: [g_lock.acquire]
+      - decl: [xch, ptr<kontor.http.Exchange>, { call: [wrap, req, resp] }]
+      - call: [g_api.retention_preview, xch]
+      - call: [g_lock.release]
+
+- def:
+    name: on_retention_run
+    args: [[req, http_request_handle], [resp, http_response_handle]]
+    body:
+      - call: [g_lock.acquire]
+      - decl: [xch, ptr<kontor.http.Exchange>, { call: [wrap, req, resp] }]
+      - call: [g_api.retention_run, xch]
+      - call: [g_lock.release]
+
+- def:
+    name: on_retention_runs
+    args: [[req, http_request_handle], [resp, http_response_handle]]
+    body:
+      - call: [g_lock.acquire]
+      - decl: [xch, ptr<kontor.http.Exchange>, { call: [wrap, req, resp] }]
+      - call: [g_api.retention_runs, xch]
+      - call: [g_lock.release]
+
+- def:
+    name: on_protected_list
+    args: [[req, http_request_handle], [resp, http_response_handle]]
+    body:
+      - call: [g_lock.acquire]
+      - decl: [xch, ptr<kontor.http.Exchange>, { call: [wrap, req, resp] }]
+      - call: [g_api.protected_list, xch]
+      - call: [g_lock.release]
+
+- def:
+    name: on_protected_put
+    args: [[req, http_request_handle], [resp, http_response_handle]]
+    body:
+      - call: [g_lock.acquire]
+      - decl: [xch, ptr<kontor.http.Exchange>, { call: [wrap, req, resp] }]
+      - call: [g_api.protected_put, xch]
+      - call: [g_lock.release]
+
+- def:
+    name: on_protected_delete
+    args: [[req, http_request_handle], [resp, http_response_handle]]
+    body:
+      - call: [g_lock.acquire]
+      - decl: [xch, ptr<kontor.http.Exchange>, { call: [wrap, req, resp] }]
+      - call: [g_api.protected_delete, xch]
+      - call: [g_lock.release]
+
+- def:
+    name: on_exodus_delete
+    args: [[req, http_request_handle], [resp, http_response_handle]]
+    body:
+      - call: [g_lock.acquire]
+      - decl: [xch, ptr<kontor.http.Exchange>, { call: [wrap, req, resp] }]
+      - call: [g_api.exodus_delete, xch]
+      - call: [g_lock.release]
+
+# Scheduled retention (web_ui.md FW-45): checks every 30 s whether the
+# policy's daily time has come.
+- def:
+    name: retention_loop
+    body:
+      - decl: [running, i32, 1]
+      - while:
+          condition: { eq: [running, 1] }
+          body:
+            - call: [time.sleep_ms, 30000]
+            - call: [g_lock.acquire]
+            - call: [g_api.retention_tick]
+            - call: [g_lock.release]
+
+- def:
+    name: on_settings_get
+    args: [[req, http_request_handle], [resp, http_response_handle]]
+    body:
+      - call: [g_lock.acquire]
+      - decl: [xch, ptr<kontor.http.Exchange>, { call: [wrap, req, resp] }]
+      - call: [g_api.settings_get, xch]
+      - call: [g_lock.release]
+
+- def:
+    name: on_settings_put
+    args: [[req, http_request_handle], [resp, http_response_handle]]
+    body:
+      - call: [g_lock.acquire]
+      - decl: [xch, ptr<kontor.http.Exchange>, { call: [wrap, req, resp] }]
+      - call: [g_api.settings_put, xch]
+      - call: [g_lock.release]
+
+- def:
     name: on_not_found
     args: [[req, http_request_handle], [resp, http_response_handle]]
     body:
@@ -354,6 +539,58 @@
             - decl: [from_env, string, { call: [envm.get, "KONTOR_ADMIN_TOKEN"] }]
             - return: [{ call: [from_env.trim] }]
       - return: [""]
+
+# Value of `--<flag> <value>` ("" when absent).
+- def:
+    name: flag_value
+    args: [[flag, string]]
+    return: string
+    body:
+      - decl: [idx, i32, 1]
+      - while:
+          condition: { lt: [idx, 64] }
+          body:
+            - decl: [word, string, { call: [sys.get_arg, idx] }]
+            - if: { condition: { or: [{ eq: [word, null] }, { eq: [word.len, 0] }] }, then: [{ return: [""] }] }
+            - if:
+                condition: { eq: [word, flag] }
+                then:
+                  - decl: [value, string, { call: [sys.get_arg, { +: [idx, 1] }] }]
+                  - if: { condition: { eq: [value, null] }, then: [{ return: [""] }] }
+                  - return: [value]
+            - set: [idx, { +: [idx, 1] }]
+      - return: [""]
+
+# Where the web UI may be (web_ui.md FW-11), first that exists wins:
+# --ui-dir, $KONTOR_UI_DIR, <binary>/../share/kontor/ui,
+# <binary>/../lib/aiml/kontor/ui/dist (a venv install), ./ui/dist.
+- def:
+    name: ui_candidates
+    return: list<string>
+    body:
+      - decl: [out, list<string>, []]
+      - decl: [flagged, string, { call: [flag_value, "--ui-dir"] }]
+      - if:
+          condition: { gt: [flagged.len, 0] }
+          then:
+            - call: [out.push, flagged]
+            - return: [out]
+      - decl: [envm, map<string:string>, sys.env]
+      - if:
+          condition: { call: [envm.contains, "KONTOR_UI_DIR"] }
+          then:
+            - call: [out.push, { call: [envm.get, "KONTOR_UI_DIR"] }]
+            - return: [out]
+      - decl: [self, string, { call: [sys.get_arg, 0] }]
+      - if:
+          condition: { and: [{ neq: [self, null] }, { gt: [self.len, 0] }] }
+          then:
+            - decl: [real, path, { call: [io.realpath, self] }]
+            - decl: [bin_dir, path, { call: [real.parent] }]
+            - call: [out.push, "${bin_dir}/../share/kontor/ui"]
+            - call: [out.push, "${bin_dir}/../lib/aiml/kontor/ui/dist"]
+      - call: [out.push, "./ui/dist"]
+      - return: [out]
 
 # Positional argument `want` (1-based), skipping --flag value pairs.
 - def:
@@ -421,6 +658,7 @@
           then:
             - call: [log.error, "kontor.yaml: ${problem}"]
             - return: [2]
+      - call: [g_api.setup_ui, { call: [ui_candidates] }]
       - decl: [secret, string, { call: [bootstrap_secret] }]
       - if:
           condition: { gt: [secret.len, 0] }
@@ -436,6 +674,9 @@
       - decl: [worker, thread_handle]
       - set: [worker, { spawn: [kontor.hooks.worker_loop, data_dir, public_url] }]
       - call: [worker.detach]
+      - decl: [scheduler, thread_handle]
+      - set: [scheduler, { spawn: [retention_loop] }]
+      - call: [scheduler.detach]
 
       - decl: [srv, http_server_handle]
       - set: [srv, { call: [http.server, "0.0.0.0", port] }]
@@ -484,6 +725,28 @@
       - call: [srv.route, "PATCH", "/v2/*", on_v2_patch]
       - call: [srv.route, "PUT", "/v2/*", on_v2_put]
       - call: [srv.route, "DELETE", "/v2/*", on_v2_delete]
+      - call: [srv.route, "GET", "/api/v1/catalog", on_catalog]
+      - call: [srv.route, "GET", "/api/v1/catalog/exodus/:name", on_catalog_project]
+      - call: [srv.route, "GET", "/api/v1/catalog/generic", on_catalog_generic]
+      - call: [srv.route, "GET", "/api/v1/list/generic", on_list_generic]
+      - call: [srv.route, "GET", "/api/v1/list/exodus", on_list_exodus]
+      - call: [srv.route, "GET", "/api/v1/list/exodus/:name", on_list_versions]
+      - call: [srv.route, "GET", "/api/v1/retention", on_retention_get]
+      - call: [srv.route, "PUT", "/api/v1/retention", on_retention_put]
+      - call: [srv.route, "POST", "/api/v1/retention/preview", on_retention_preview]
+      - call: [srv.route, "POST", "/api/v1/retention/run", on_retention_run]
+      - call: [srv.route, "GET", "/api/v1/retention/runs", on_retention_runs]
+      - call: [srv.route, "GET", "/api/v1/protected", on_protected_list]
+      - call: [srv.route, "PUT", "/api/v1/protected", on_protected_put]
+      - call: [srv.route, "DELETE", "/api/v1/protected", on_protected_delete]
+      - call: [srv.route, "DELETE", "/exodus/:name/:version", on_exodus_delete]
+      - call: [srv.route, "DELETE", "/api/v1/exodus/:name/:version", on_exodus_delete]
+      - call: [srv.route, "GET", "/api/v1/settings", on_settings_get]
+      - call: [srv.route, "PUT", "/api/v1/settings", on_settings_put]
+      - call: [srv.route, "POST", "/api/v1/sessions", on_session_create]
+      - call: [srv.route, "GET", "/", on_ui]
+      - call: [srv.route, "GET", "/ui", on_ui]
+      - call: [srv.route, "GET", "/ui/*", on_ui]
       - call: [srv.route, "*", "/*", on_not_found]
       - call: [log.info, "kontor listening on :${port}, data in ${data_dir}"]
       - call: [srv.start]
