@@ -44,9 +44,11 @@ License under Section 3.
 
   a) Production Use requires a Commercial License. It is granted as a rental
      for one year at a time ("License Year") and costs EUR 5,000 (five
-     thousand euros) per License Year for this Software, per legal entity together with its
-     Affiliates, plus statutory VAT where
-     applicable.
+     thousand euros) per License Year, per legal entity together with its
+     Affiliates, plus statutory VAT where applicable. The Commercial License
+     is offered only as a bundle: one fee covers all three tools cosmos, ufo
+     and kontor (https://github.com/Pymann/cosmos, /ufo and /kontor); they
+     are not licensed separately.
   b) The fee is due in advance at the start of each License Year. A
      Commercial License renews for another License Year when the fee for it
      is paid, and ends at the end of the last License Year that was paid
@@ -119,5 +121,5 @@ License under Section 3.
 
 10. Contact
 
-  To obtain a Commercial License, contact the Licensor through
-  https://github.com/Pymann.
+  To obtain a Commercial License, contact the Licensor by e-mail at
+  n.ehrhardt88@gmail.com.
