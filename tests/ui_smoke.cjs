@@ -45,6 +45,10 @@ const ok = (what, cond, more) => {
   const who = await waitCall('/api/v1/whoami', 15000);
   ok('the UI started and asked who it is', who !== null);
   ok('anonymous whoami is 200', who && who.status === 200, who && who.status);
+  // An anonymous reader's start also loads the catalog; let that answer
+  // arrive before the next phase counts calls, or it is taken for the
+  // signed-in page's.
+  await waitCall('/api/v1/catalog', 5000);
 
   console.log('session from the fragment (FW-21)');
   calls.length = 0;

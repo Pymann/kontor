@@ -150,6 +150,9 @@
       - [message, string, "", { access: public }]
       # overview (FW-30, FW-31) and the generic browser (listing.md FL-01)
       - [totals, string, "", { access: public }]
+      - [kpi_blobs, string, "0", { access: public }]
+      - [kpi_disk, string, "0 B", { access: public }]
+      - [kpi_files, string, "0", { access: public }]
       - [projects, list<string>, [], { access: public }]
       - [project, string, "", { access: public }]
       - [versions, list<string>, [], { access: public }]
@@ -203,6 +206,24 @@
       - [win, window_handle, null, { access: public }]
       - [width, i32, 1280, { access: public }]
       - [height, i32, 800, { access: public }]
+      - [width_f, f32, 1280.0, { access: public }]
+      - [height_f, f32, 800.0, { access: public }]
+      # this frame's pointer: position, button released, wheel
+      - [mouse_x, f32, 0.0, { access: public }]
+      - [mouse_y, f32, 0.0, { access: public }]
+      - [released, i32, 0, { access: public }]
+      - [wheel, f32, 0.0, { access: public }]
+      # first visible row of each list
+      - [proj_scroll, i32, 0, { access: public }]
+      - [ver_scroll, i32, 0, { access: public }]
+      - [gen_scroll, i32, 0, { access: public }]
+      - [user_scroll, i32, 0, { access: public }]
+      # text field generation (field) and the page it was made for
+      - [form_gen, i32, 0, { access: public }]
+      - [shown_page, i32, -1, { access: public }]
+      - [bare, ui_style, null, { access: public }]
+      - [input_style, ui_label_style, null, { access: public }]
+      - [big_style, ui_label_style, null, { access: public }]
 
 - classgroup:
     name: KontorUi
@@ -324,6 +345,9 @@
                 - decl: [gen, ref<yaml_node>, { call: [yaml.get, root, "generic"] }]
                 - decl: [gen_files, string, { call: [yaml.scalar, { call: [yaml.get, gen, "files"] }] }]
                 - set: [<.totals, "${blobs} blobs, ${{ call: [ui_bytes, disk] }} on disk, ${gen_files} generic files"]
+                - set: [<.kpi_blobs, blobs]
+                - set: [<.kpi_disk, { call: [ui_bytes, disk] }]
+                - set: [<.kpi_files, gen_files]
                 - call: [<.projects.clear]
                 - decl: [seq, ref<yaml_node>, { call: [yaml.get, root, "exodus"] }]
                 - decl: [count, i32, { call: [yaml.size, seq] }]
@@ -706,244 +730,623 @@
                 - if: { condition: { eq: [target, 2] }, then: [{ call: [<.load_retention] }] }
                 - if: { condition: { eq: [target, 3] }, then: [{ call: [<.load_settings] }] }
 
+      # The view draws with ui.draw_* at window pixels and tests its own
+      # clicks (ui_hit).  aiml's grid widgets place every widget at the full
+      # width of its cell and `ui.same_line` puts the next one on top of the
+      # previous (aiml 1.0.2.8), so a row of buttons cannot be laid out with
+      # them; only the text fields are aiml widgets, each in a grid cell of
+      # its own (place_begin).  Colours are the ones cosmos uses.
       - class: UiView
         instance: view
         sees: [store]
         methods:
+          # ── primitives ──────────────────────────────────────────────────
+          - def:
+              name: fill
+              args: [[left, f32], [top, f32], [wide, f32], [tall, f32], [color, i32]]
+              body:
+                - call: [ui.draw_rect, left, top, wide, tall, color]
+
+          # A rectangle with a 1 px border.
+          - def:
+              name: box
+              args: [[left, f32], [top, f32], [wide, f32], [tall, f32], [color, i32], [edge, i32]]
+              body:
+                - call: [ui.draw_rect, left, top, wide, tall, edge]
+                - call: [ui.draw_rect, { +: [left, 1.0] }, { +: [top, 1.0] }, { -: [wide, 2.0] }, { -: [tall, 2.0] }, color]
+
+          - def:
+              name: text
+              args: [[left, f32], [top, f32], [line, string], [color, i32]]
+              body:
+                - call: [ui.draw_text, left, top, line, color]
+
+          - def:
+              name: text_big
+              args: [[left, f32], [top, f32], [line, string], [color, i32]]
+              body:
+                - if:
+                    condition: { neq: [<.big_style, null] }
+                    then:
+                      - call: [ui.draw_text, left, top, line, color, <.big_style]
+                    else:
+                      - call: [ui.draw_text, left, top, line, color]
+
+          # `line` cut to `wide` pixels, with "..." when it had to be cut.
+          - def:
+              name: fit
+              args: [[line, string], [wide, f32]]
+              return: string
+              body:
+                - if: { condition: { le: [{ call: [ui.measure_text, line] }, wide] }, then: [{ return: [line] }] }
+                - decl: [keep, i32, line.len]
+                - decl: [cut, string, line]
+                - while:
+                    condition: { and: [{ gt: [keep, 0] }, { gt: [{ call: [ui.measure_text, "${cut}..."] }, wide] }] }
+                    body:
+                      - set: [keep, { -: [keep, 1] }]
+                      - set: [cut, { call: [line.substr, 0, keep] }]
+                - return: ["${cut}..."]
+
+          - def:
+              name: text_fit
+              args: [[left, f32], [top, f32], [wide, f32], [line, string], [color, i32]]
+              body:
+                - call: [ui.draw_text, left, top, { call: [<.fit, line, wide] }, color]
+
+          # Text vertically centred in a row of height `tall` starting at `top`.
+          - def:
+              name: row_text
+              args: [[left, f32], [top, f32], [tall, f32], [wide, f32], [line, string], [color, i32]]
+              body:
+                - decl: [line_h, f32, { call: [ui.text_height] }]
+                - decl: [ypos, f32, { +: [top, { /: [{ -: [tall, line_h] }, 2.0] }] }]
+                - call: [<.text_fit, left, ypos, wide, line, color]
+
+          - def:
+              name: hover
+              args: [[left, f32], [top, f32], [wide, f32], [tall, f32]]
+              return: i32
+              body:
+                - if:
+                    condition: { and: [{ and: [{ ge: [<.mouse_x, left] }, { lt: [<.mouse_x, { +: [left, wide] }] }] }, { and: [{ ge: [<.mouse_y, top] }, { lt: [<.mouse_y, { +: [top, tall] }] }] }] }
+                    then: [{ return: [1] }]
+                - return: [0]
+
+          # 1 when the mouse button came up over the rectangle this frame.
+          - def:
+              name: hit
+              args: [[left, f32], [top, f32], [wide, f32], [tall, f32]]
+              return: i32
+              body:
+                - if: { condition: { eq: [<.released, 0] }, then: [{ return: [0] }] }
+                - return: [{ call: [<.hover, left, top, wide, tall] }]
+
+          # A button; kind 0 plain, 1 primary (green), 2 danger (red).
+          - def:
+              name: button
+              args: [[left, f32], [top, f32], [wide, f32], [tall, f32], [label, string], [kind, i32]]
+              return: i32
+              body:
+                - decl: [over, i32, { call: [<.hover, left, top, wide, tall] }]
+                - decl: [face, i32, 0x16202EFF]
+                - decl: [edge, i32, 0x2C3A50FF]
+                - decl: [ink, i32, 0xDFE6EFFF]
+                - if: { condition: { eq: [kind, 1] }, then: [{ set: [face, 0x15301FFF] }, { set: [edge, 0x3D8A5AFF] }, { set: [ink, 0xBDF0CDFF] }] }
+                - if: { condition: { eq: [kind, 2] }, then: [{ set: [face, 0x2A1616FF] }, { set: [edge, 0x8A3D3DFF] }, { set: [ink, 0xFFB4AAFF] }] }
+                - if: { condition: { eq: [over, 1] }, then: [{ set: [edge, 0xE8C060FF] }] }
+                - call: [<.box, left, top, wide, tall, face, edge]
+                - decl: [label_w, f32, { call: [ui.measure_text, label] }]
+                - decl: [line_h, f32, { call: [ui.text_height] }]
+                - call: [ui.draw_text, { +: [left, { /: [{ -: [wide, label_w] }, 2.0] }] }, { +: [top, { /: [{ -: [tall, line_h] }, 2.0] }] }, label, ink]
+                - return: [{ call: [<.hit, left, top, wide, tall] }]
+
+          # Width a button needs for `label`.
+          - def:
+              name: button_w
+              args: [[label, string]]
+              return: f32
+              body:
+                - return: [{ +: [{ call: [ui.measure_text, label] }, 28.0] }]
+
+          # A panel: background, border, and a small upper-case caption.
+          - def:
+              name: panel
+              args: [[left, f32], [top, f32], [wide, f32], [tall, f32], [caption, string]]
+              body:
+                - call: [<.box, left, top, wide, tall, 0x111824FF, 0x243043FF]
+                - if:
+                    condition: { gt: [caption.len, 0] }
+                    then:
+                      - call: [<.text, { +: [left, 14.0] }, { +: [top, 12.0] }, { call: [caption.upper] }, 0x8796A8FF]
+
+          # A table header line (column captions in dim text, a rule below).
+          - def:
+              name: rule
+              args: [[left, f32], [top, f32], [wide, f32]]
+              body:
+                - call: [<.fill, left, top, wide, 1.0, 0x1E2938FF]
+
+          # A grid cell exactly over the rectangle, for one aiml text widget.
+          # Its own background is switched off (the cell would paint one).
+          - def:
+              name: place_begin
+              args: [[left, f32], [top, f32], [wide, f32], [tall, f32]]
+              body:
+                - decl: [win_w, f32, <.width_f]
+                - decl: [win_h, f32, <.height_f]
+                - decl: [cols, buffer<f32>, [{ /: [{ call: [math.max, left, 1.0] }, win_w] }, { /: [wide, win_w] }, 1.0]]
+                - decl: [rows, buffer<f32>, [{ /: [{ call: [math.max, top, 1.0] }, win_h] }, { /: [tall, win_h] }, 1.0]]
+                - call: [ui.set_gap, 0.0, 0.0]
+                - call: [ui.begin_grid, cols, rows]
+                - call: [ui.push_style, <.bare]
+                - call: [ui.begin_cell, 1, 1, 1, 1]
+                - call: [ui.pop_style]
+
+          - def:
+              name: place_end
+              body:
+                - call: [ui.end_cell]
+                - call: [ui.end_grid]
+
+          # A labelled text field at (left, top); returns the new text.  The
+          # widget id carries <.form_gen: aiml keeps a field's text by id and
+          # ignores the value passed in later, so a field that must show a
+          # new value (Edit, a page loaded again) gets a new id.
+          - def:
+              name: field
+              args: [[left, f32], [top, f32], [wide, f32], [caption, string], [key, string], [value, string], [secret, i32]]
+              return: string
+              body:
+                - call: [<.text, left, top, caption, 0x8796A8FF]
+                - call: [<.place_begin, left, { +: [top, 20.0] }, wide, 34.0]
+                - decl: [out, string, value]
+                - if:
+                    condition: { eq: [secret, 1] }
+                    then:
+                      - set: [out, { call: [ui.password_input, "${key}##${<.form_gen}", value, <.input_style] }]
+                    else:
+                      - set: [out, { call: [ui.text_input, "${key}##${<.form_gen}", value, <.input_style] }]
+                - call: [<.place_end]
+                - return: [out]
+
+          # A coloured dot (status, like cosmos' run list).
+          - def:
+              name: dot
+              args: [[left, f32], [top, f32], [color, i32]]
+              body:
+                - call: [ui.draw_rect, left, top, 8.0, 8.0, color]
+
+          # Scroll offset (rows) of a list: wheel over its rectangle moves it,
+          # clamped so the last row stays at the bottom.
+          - def:
+              name: scrolled
+              args: [[current, i32], [count, i32], [fits, i32], [left, f32], [top, f32], [wide, f32], [tall, f32]]
+              return: i32
+              body:
+                - decl: [pos, i32, current]
+                - if:
+                    condition: { eq: [{ call: [<.hover, left, top, wide, tall] }, 1] }
+                    then:
+                      - if: { condition: { lt: [<.wheel, -0.1] }, then: [{ set: [pos, { +: [pos, 2] }] }] }
+                      - if: { condition: { gt: [<.wheel, 0.1] }, then: [{ set: [pos, { -: [pos, 2] }] }] }
+                - decl: [most, i32, { -: [count, fits] }]
+                - if: { condition: { gt: [pos, most] }, then: [{ set: [pos, most] }] }
+                - if: { condition: { lt: [pos, 0] }, then: [{ set: [pos, 0] }] }
+                - return: [pos]
+
+          # ── header and footer ──────────────────────────────────────────
+          - def:
+              name: tab
+              args: [[left, f32], [label, string], [target, i32]]
+              return: f32
+              body:
+                - decl: [wide, f32, { +: [{ call: [ui.measure_text, label] }, 32.0] }]
+                - decl: [ink, i32, 0x8796A8FF]
+                - if: { condition: { eq: [<.store.page, target] }, then: [{ set: [ink, 0xDFE6EFFF] }, { call: [<.fill, left, 50.0, wide, 2.0, 0xE8C060FF] }] }
+                - if: { condition: { eq: [{ call: [<.hover, left, 0.0, wide, 52.0] }, 1] }, then: [{ set: [ink, 0xFFFFFFFF] }] }
+                - call: [<.row_text, { +: [left, 16.0] }, 0.0, 52.0, wide, label, ink]
+                - if: { condition: { eq: [{ call: [<.hit, left, 0.0, wide, 52.0] }, 1] }, then: [{ call: [<.store.ask, "go", "${target}"] }] }
+                - return: [{ +: [left, wide] }]
+
           - def:
               name: header
               body:
-                - decl: [cols, buffer<f32>, [0.18, 1.0, 0.3]]
-                - decl: [rows, buffer<f32>, [1.0]]
-                - call: [ui.begin_grid, cols, rows]
-                - call: [ui.set_align, "left", "middle"]
-                - call: [ui.begin_cell, 0, 0, 1, 1]
-                - call: [ui.label, "kontor"]
-                - call: [ui.end_cell]
-                - call: [ui.set_align, "left", "middle"]
-                - call: [ui.begin_cell, 1, 0, 1, 1]
+                - decl: [win_w, f32, <.width_f]
+                - call: [<.fill, 0.0, 0.0, win_w, 52.0, 0x0E141EFF]
+                - call: [<.fill, 0.0, 51.0, win_w, 1.0, 0x243043FF]
+                - call: [<.text_big, 20.0, 13.0, "kontor", 0xE8C060FF]
+                - decl: [xpos, f32, 150.0]
                 - if:
-                    condition: { eq: [{ call: [<.store.can, "read"] }, 1] }
+                    condition: { and: [{ eq: [{ call: [<.store.can, "read"] }, 1] }, { neq: [<.store.page, 4] }] }
                     then:
-                      - if: { condition: { eq: [{ call: [ui.button, "Overview"] }, 1] }, then: [{ call: [<.store.ask, "go", "0"] }] }
+                      - set: [xpos, { call: [<.tab, xpos, "Overview", 0] }]
                 - if:
-                    condition: { eq: [{ call: [<.store.can, "admin"] }, 1] }
+                    condition: { and: [{ eq: [{ call: [<.store.can, "admin"] }, 1] }, { neq: [<.store.page, 4] }] }
                     then:
-                      - call: [ui.same_line]
-                      - if: { condition: { eq: [{ call: [ui.button, "Users"] }, 1] }, then: [{ call: [<.store.ask, "go", "1"] }] }
-                      - call: [ui.same_line]
-                      - if: { condition: { eq: [{ call: [ui.button, "Retention"] }, 1] }, then: [{ call: [<.store.ask, "go", "2"] }] }
-                      - call: [ui.same_line]
-                      - if: { condition: { eq: [{ call: [ui.button, "Settings"] }, 1] }, then: [{ call: [<.store.ask, "go", "3"] }] }
+                      - set: [xpos, { call: [<.tab, xpos, "Users", 1] }]
+                      - set: [xpos, { call: [<.tab, xpos, "Retention", 2] }]
+                      - set: [xpos, { call: [<.tab, xpos, "Settings", 3] }]
+                - decl: [right, f32, { -: [win_w, 20.0] }]
                 - if:
-                    condition: { gt: [<.store.activity.len, 0] }
+                    condition: { eq: [{ call: [<.store.signed_in] }, 1] }
                     then:
-                      - call: [ui.same_line]
-                      - call: [ui.label, "   ${<.store.activity}"]
-                - call: [ui.end_cell]
-                - call: [ui.set_align, "right", "middle"]
-                - call: [ui.begin_cell, 2, 0, 1, 1]
-                - decl: [signed_in, i32, { call: [<.store.signed_in] }]
-                - if:
-                    condition: { eq: [signed_in, 1] }
-                    then:
-                      - call: [ui.label, "${<.store.account}"]
-                      - call: [ui.same_line]
-                      - if: { condition: { eq: [{ call: [ui.button, "Sign out"] }, 1] }, then: [{ call: [<.store.ask, "sign_out", ""] }] }
+                      - decl: [out_w, f32, { call: [<.button_w, "Sign out"] }]
+                      - set: [right, { -: [right, out_w] }]
+                      - if: { condition: { eq: [{ call: [<.button, right, 11.0, out_w, 30.0, "Sign out", 0] }, 1] }, then: [{ call: [<.store.ask, "sign_out", ""] }] }
+                      - decl: [who, string, "${<.store.account}"]
+                      - decl: [who_w, f32, { call: [ui.measure_text, who] }]
+                      - set: [right, { -: [right, { +: [who_w, 16.0] }] }]
+                      - call: [<.row_text, right, 0.0, 52.0, { +: [who_w, 4.0] }, who, 0xDFE6EFFF]
                     else:
-                      - if: { condition: { eq: [{ call: [ui.button, "Sign in"] }, 1] }, then: [{ set: [<.store.page, 4] }] }
-                - call: [ui.end_cell]
-                - call: [ui.end_grid]
+                      - if:
+                          condition: { neq: [<.store.page, 4] }
+                          then:
+                            - decl: [in_w, f32, { call: [<.button_w, "Sign in"] }]
+                            - set: [right, { -: [right, in_w] }]
+                            - if: { condition: { eq: [{ call: [<.button, right, 11.0, in_w, 30.0, "Sign in", 1] }, 1] }, then: [{ set: [<.store.page, 4] }] }
 
+          - def:
+              name: footer
+              static_off: ["str_cmp"]
+              body:
+                - decl: [win_w, f32, <.width_f]
+                - decl: [top, f32, { -: [<.height_f, 30.0] }]
+                - call: [<.fill, 0.0, top, win_w, 30.0, 0x0E141EFF]
+                - call: [<.fill, 0.0, top, win_w, 1.0, 0x243043FF]
+                - decl: [msg, string, <.store.message]
+                - decl: [ink, i32, 0xDFE6EFFF]
+                - if: { condition: { or: [{ call: [msg.contains, "failed"] }, { call: [msg.contains, "ended"] }] }, then: [{ set: [ink, 0xFF8F80FF] }] }
+                - call: [<.row_text, 20.0, top, 30.0, { -: [win_w, 420.0] }, msg, ink]
+                - decl: [act, string, <.store.activity]
+                - if:
+                    condition: { gt: [act.len, 0] }
+                    then:
+                      - decl: [act_w, f32, { call: [ui.measure_text, act] }]
+                      - decl: [act_ink, i32, 0x8796A8FF]
+                      - if: { condition: { gt: [<.store.activity_lines.len, 0] }, then: [{ set: [act_ink, 0xFFCC66FF] }] }
+                      - call: [<.row_text, { -: [win_w, { +: [act_w, 20.0] }] }, top, 30.0, { +: [act_w, 4.0] }, act, act_ink]
+
+          # ── pages ───────────────────────────────────────────────────────
           - def:
               name: login_page
               body:
-                - decl: [cols, buffer<f32>, [1.0, 0.36, 1.0]]
-                - decl: [rows, buffer<f32>, [0.2, 1.0]]
-                - call: [ui.begin_grid, cols, rows]
-                - call: [ui.begin_cell, 1, 1, 1, 1]
-                - call: [ui.label, "Sign in to kontor"]
-                - call: [ui.spacer, 8.0]
-                - call: [ui.label, "User"]
-                - set: [<.store.login_name, { call: [ui.text_input, "login_name", <.store.login_name] }]
-                - call: [ui.label, "Password"]
-                - set: [<.store.login_password, { call: [ui.password_input, "login_password", <.store.login_password] }]
-                - call: [ui.spacer, 8.0]
-                - decl: [submit, i32, { call: [ui.button, "Sign in"] }]
+                - decl: [wide, f32, 380.0]
+                - decl: [tall, f32, 290.0]
+                - decl: [left, f32, { /: [{ -: [<.width_f, wide] }, 2.0] }]
+                - decl: [top, f32, { call: [math.max, 80.0, { /: [{ -: [<.height_f, tall] }, 2.5] }] }]
+                - call: [<.box, left, top, wide, tall, 0x111824FF, 0x243043FF]
+                - call: [<.text_big, { +: [left, 24.0] }, { +: [top, 22.0] }, "Sign in to kontor", 0xDFE6EFFF]
+                - set: [<.store.login_name, { call: [<.field, { +: [left, 24.0] }, { +: [top, 70.0] }, { -: [wide, 48.0] }, "User", "login_name", <.store.login_name, 0] }]
+                - set: [<.store.login_password, { call: [<.field, { +: [left, 24.0] }, { +: [top, 136.0] }, { -: [wide, 48.0] }, "Password", "login_password", <.store.login_password, 1] }]
+                - decl: [submit, i32, { call: [<.button, { +: [left, 24.0] }, { +: [top, 220.0] }, { -: [wide, 48.0] }, 40.0, "Sign in", 1] }]
                 - if: { condition: { eq: [{ call: [input.key_pressed, "enter"] }, 1] }, then: [{ set: [submit, 1] }] }
                 - if: { condition: { eq: [submit, 1] }, then: [{ call: [<.store.ask, "sign_in", ""] }] }
-                - call: [ui.end_cell]
-                - call: [ui.end_grid]
+
+          # One figure of the overview's top row.
+          - def:
+              name: tile
+              args: [[left, f32], [top, f32], [wide, f32], [figure, string], [caption, string], [color, i32]]
+              body:
+                - call: [<.box, left, top, wide, 68.0, 0x111824FF, 0x243043FF]
+                - call: [<.text_big, { +: [left, 16.0] }, { +: [top, 10.0] }, { call: [<.fit, figure, { -: [wide, 32.0] }] }, color]
+                - call: [<.text, { +: [left, 16.0] }, { +: [top, 42.0] }, caption, 0x8796A8FF]
 
           - def:
               name: overview_page
+              static_off: ["str_cmp"]
+              args: [[left, f32], [top, f32], [wide, f32], [tall, f32]]
               body:
-                - decl: [cols, buffer<f32>, [0.35, 1.0]]
-                - decl: [rows, buffer<f32>, [1.0]]
-                - call: [ui.set_gap, 16.0, 8.0]
-                - call: [ui.begin_grid, cols, rows]
-                - call: [ui.set_scroll, "y"]
-                - call: [ui.begin_cell, 0, 0, 1, 1]
-                - call: [ui.label, "${<.store.totals}"]
+                # the figures
+                - decl: [gap, f32, 12.0]
+                - decl: [tile_w, f32, { /: [{ -: [wide, { "*": [gap, 3.0] }] }, 4.0] }]
+                - call: [<.tile, left, top, tile_w, "${<.store.projects.len}", "exodus projects", 0xE8C060FF]
+                - call: [<.tile, { +: [left, { +: [tile_w, gap] }] }, top, tile_w, <.store.kpi_files, "generic files", 0x8FC7FFFF]
+                - call: [<.tile, { +: [left, { "*": [{ +: [tile_w, gap] }, 2.0] }] }, top, tile_w, <.store.kpi_disk, "on disk (${<.store.kpi_blobs} blobs)", 0xDFE6EFFF]
+                - decl: [moving, i32, <.store.activity_lines.len]
+                - decl: [move_ink, i32, 0x66CC88FF]
+                - decl: [move_text, string, "idle"]
+                - if: { condition: { gt: [moving, 0] }, then: [{ set: [move_ink, 0xFFCC66FF] }, { set: [move_text, "${moving}"] }] }
+                - call: [<.tile, { +: [left, { "*": [{ +: [tile_w, gap] }, 3.0] }] }, top, tile_w, move_text, "running transfers", move_ink]
+                - decl: [body_top, f32, { +: [top, 82.0] }]
+                - decl: [body_h, f32, { -: [tall, 82.0] }]
+                # running transfers, when there are any
                 - if:
-                    condition: { gt: [<.store.activity_lines.len, 0] }
+                    condition: { gt: [moving, 0] }
                     then:
-                      - call: [ui.separator]
-                      - call: [ui.label, "running transfers"]
+                      - decl: [strip_h, f32, { +: [40.0, { "*": [22.0, { cast: [moving, f32] }] }] }]
+                      - if: { condition: { gt: [strip_h, 150.0] }, then: [{ set: [strip_h, 150.0] }] }
+                      - call: [<.panel, left, body_top, wide, strip_h, "Running transfers"]
                       - decl: [tidx, i32, 0]
+                      - decl: [trow_y, f32, { +: [body_top, 34.0] }]
                       - while:
-                          condition: { lt: [tidx, <.store.activity_lines.len] }
+                          condition: { and: [{ lt: [tidx, moving] }, { lt: [{ +: [trow_y, 22.0] }, { +: [body_top, strip_h] }] }] }
                           body:
-                            - call: [ui.label, { call: [<.store.activity_lines.get, tidx] }]
+                            - call: [<.dot, { +: [left, 16.0] }, { +: [trow_y, 6.0] }, 0xFFCC66FF]
+                            - call: [<.text_fit, { +: [left, 32.0] }, trow_y, { -: [wide, 48.0] }, { call: [<.store.activity_lines.get, tidx] }, 0xDFE6EFFF]
+                            - set: [trow_y, { +: [trow_y, 22.0] }]
                             - set: [tidx, { +: [tidx, 1] }]
-                - call: [ui.separator]
-                - call: [ui.label, "exodus projects"]
-                - decl: [idx, i32, 0]
+                      - set: [body_top, { +: [body_top, { +: [strip_h, 12.0] }] }]
+                      - set: [body_h, { -: [body_h, { +: [strip_h, 12.0] }] }]
+                # the project list
+                - decl: [list_w, f32, 300.0]
+                - call: [<.panel, left, body_top, list_w, body_h, "Projects"]
+                - decl: [row_h, f32, 34.0]
+                - decl: [list_top, f32, { +: [body_top, 36.0] }]
+                - decl: [list_h, f32, { -: [body_h, { +: [36.0, 56.0] }] }]
+                - decl: [count, i32, <.store.projects.len]
+                - decl: [fits, i32, { cast: [{ /: [list_h, row_h] }, i32] }]
+                - set: [<.proj_scroll, { call: [<.scrolled, <.proj_scroll, count, fits, left, list_top, list_w, list_h] }]
+                - decl: [idx, i32, <.proj_scroll]
+                - decl: [ypos, f32, list_top]
+                - if: { condition: { eq: [count, 0] }, then: [{ call: [<.text, { +: [left, 16.0] }, { +: [list_top, 8.0] }, "Nothing published yet", 0x8796A8FF] }] }
                 - while:
-                    condition: { lt: [idx, <.store.projects.len] }
+                    condition: { and: [{ lt: [idx, count] }, { le: [{ +: [ypos, row_h] }, { +: [list_top, list_h] }] }] }
                     body:
                       - decl: [name, string, { call: [<.store.projects.get, idx] }]
-                      - if: { condition: { eq: [{ call: [ui.button, name] }, 1] }, then: [{ call: [<.store.ask, "open_project", name] }] }
+                      - decl: [chosen, i32, 0]
+                      - if: { condition: { and: [{ eq: [<.store.browsing, 0] }, { eq: [<.store.project, name] }] }, then: [{ set: [chosen, 1] }] }
+                      - if: { condition: { eq: [chosen, 1] }, then: [{ call: [<.fill, { +: [left, 6.0] }, ypos, { -: [list_w, 12.0] }, row_h, 0x1C2A3FFF] }, { call: [<.fill, { +: [left, 6.0] }, ypos, 3.0, row_h, 0xE8C060FF] }] }
+                      - if: { condition: { and: [{ eq: [chosen, 0] }, { eq: [{ call: [<.hover, left, ypos, list_w, row_h] }, 1] }] }, then: [{ call: [<.fill, { +: [left, 6.0] }, ypos, { -: [list_w, 12.0] }, row_h, 0x16202EFF] }] }
+                      - call: [<.row_text, { +: [left, 18.0] }, ypos, row_h, { -: [list_w, 36.0] }, name, 0xDFE6EFFF]
+                      - if: { condition: { eq: [{ call: [<.hit, left, ypos, list_w, row_h] }, 1] }, then: [{ call: [<.store.ask, "open_project", name] }] }
+                      - set: [ypos, { +: [ypos, row_h] }]
                       - set: [idx, { +: [idx, 1] }]
-                - call: [ui.separator]
-                - if: { condition: { eq: [{ call: [ui.button, "Generic files"] }, 1] }, then: [{ call: [<.store.ask, "browse", ""] }] }
-                - call: [ui.end_cell]
-                - call: [ui.set_scroll, "y"]
-                - call: [ui.begin_cell, 1, 0, 1, 1]
+                # the way into the generic files, at the panel's foot
+                - decl: [gen_top, f32, { -: [{ +: [body_top, body_h] }, 50.0] }]
+                - call: [<.rule, { +: [left, 1.0] }, { -: [gen_top, 6.0] }, { -: [list_w, 2.0] }]
+                - decl: [gen_ink, i32, 0x8FC7FFFF]
+                - if: { condition: { eq: [<.store.browsing, 1] }, then: [{ call: [<.fill, { +: [left, 6.0] }, gen_top, { -: [list_w, 12.0] }, row_h, 0x1C2A3FFF] }, { call: [<.fill, { +: [left, 6.0] }, gen_top, 3.0, row_h, 0xE8C060FF] }] }
+                - call: [<.row_text, { +: [left, 18.0] }, gen_top, row_h, { -: [list_w, 36.0] }, "Generic files  /", gen_ink]
+                - if: { condition: { eq: [{ call: [<.hit, left, gen_top, list_w, row_h] }, 1] }, then: [{ call: [<.store.ask, "browse", ""] }] }
+                # the detail
+                - decl: [det_left, f32, { +: [left, { +: [list_w, 12.0] }] }]
+                - decl: [det_w, f32, { -: [wide, { +: [list_w, 12.0] }] }]
                 - if:
                     condition: { eq: [<.store.browsing, 1] }
                     then:
-                      - call: [<.generic_list]
+                      - call: [<.generic_list, det_left, body_top, det_w, body_h]
                     else:
-                      - call: [<.project_detail]
-                - call: [ui.end_cell]
-                - call: [ui.end_grid]
+                      - call: [<.project_detail, det_left, body_top, det_w, body_h]
 
           - def:
               name: project_detail
+              args: [[left, f32], [top, f32], [wide, f32], [tall, f32]]
               body:
+                - call: [<.panel, left, top, wide, tall, ""]
                 - if:
                     condition: { eq: [<.store.project.len, 0] }
                     then:
-                      - call: [ui.label, "Pick a project on the left."]
+                      - call: [<.text, { +: [left, 20.0] }, { +: [top, 20.0] }, "Pick a project on the left to see its versions and how to install it.", 0x8796A8FF]
                       - return: []
-                - call: [ui.label, "${<.store.project}"]
+                - call: [<.text_big, { +: [left, 20.0] }, { +: [top, 16.0] }, <.store.project, 0xE8C060FF]
+                - call: [<.text, { +: [left, 20.0] }, { +: [top, 46.0] }, "exodus project", 0x8796A8FF]
+                - decl: [ypos, f32, { +: [top, 76.0] }]
                 - if:
                     condition: { gt: [<.store.install.len, 0] }
                     then:
-                      - call: [ui.label, "${<.store.install}"]
-                      - if: { condition: { eq: [{ call: [ui.button, "Copy install command"] }, 1] }, then: [{ call: [input.clipboard_set, <.store.install] }] }
-                - call: [ui.separator]
-                - decl: [idx, i32, 0]
+                      - call: [<.text, { +: [left, 20.0] }, ypos, "INSTALL", 0x8796A8FF]
+                      - set: [ypos, { +: [ypos, 22.0] }]
+                      - decl: [copy_w, f32, { call: [<.button_w, "Copy"] }]
+                      - decl: [cmd_w, f32, { -: [wide, { +: [52.0, copy_w] }] }]
+                      - call: [<.box, { +: [left, 20.0] }, ypos, cmd_w, 34.0, 0x0A0D14FF, 0x243043FF]
+                      - call: [<.row_text, { +: [left, 32.0] }, ypos, 34.0, { -: [cmd_w, 24.0] }, <.store.install, 0x8FC7FFFF]
+                      - if: { condition: { eq: [{ call: [<.button, { +: [left, { +: [28.0, cmd_w] }] }, ypos, copy_w, 34.0, "Copy", 0] }, 1] }, then: [{ call: [input.clipboard_set, <.store.install] }, { set: [<.store.message, "Install command copied"] }] }
+                      - set: [ypos, { +: [ypos, 54.0] }]
+                # the versions, newest first, as a table
+                - decl: [col_ver, f32, { +: [left, 20.0] }]
+                - decl: [col_size, f32, { +: [left, { "*": [wide, 0.45] }] }]
+                - decl: [col_who, f32, { +: [left, { "*": [wide, 0.65] }] }]
+                - call: [<.text, col_ver, ypos, "VERSION", 0x8796A8FF]
+                - call: [<.text, col_size, ypos, "SIZE", 0x8796A8FF]
+                - call: [<.text, col_who, ypos, "PUBLISHED BY", 0x8796A8FF]
+                - set: [ypos, { +: [ypos, 24.0] }]
+                - call: [<.rule, { +: [left, 14.0] }, ypos, { -: [wide, 28.0] }]
+                - decl: [row_h, f32, 30.0]
+                - decl: [list_h, f32, { -: [{ +: [top, tall] }, { +: [ypos, 10.0] }] }]
+                - decl: [count, i32, <.store.versions.len]
+                - decl: [fits, i32, { cast: [{ /: [list_h, row_h] }, i32] }]
+                - set: [<.ver_scroll, { call: [<.scrolled, <.ver_scroll, count, fits, left, ypos, wide, list_h] }]
+                - decl: [idx, i32, <.ver_scroll]
                 - while:
-                    condition: { lt: [idx, <.store.versions.len] }
+                    condition: { and: [{ lt: [idx, count] }, { le: [{ +: [ypos, row_h] }, { +: [top, tall] }] }] }
                     body:
-                      - call: [ui.label, { call: [<.store.versions.get, idx] }]
+                      - decl: [row_line, string, { call: [<.store.versions.get, idx] }]
+                      - decl: [parts, list<string>, { call: [row_line.split, "   "] }]
+                      - decl: [ink, i32, 0xDFE6EFFF]
+                      - if: { condition: { gt: [idx, 0] }, then: [{ set: [ink, 0xB8C2CFFF] }] }
+                      - if: { condition: { gt: [parts.len, 0] }, then: [{ call: [<.row_text, col_ver, ypos, row_h, { -: [col_size, { +: [col_ver, 12.0] }] }, { call: [parts.get, 0] }, ink] }] }
+                      - if: { condition: { gt: [parts.len, 1] }, then: [{ call: [<.row_text, col_size, ypos, row_h, { -: [col_who, { +: [col_size, 12.0] }] }, { call: [parts.get, 1] }, 0x8796A8FF] }] }
+                      - if: { condition: { gt: [parts.len, 2] }, then: [{ call: [<.row_text, col_who, ypos, row_h, { -: [{ +: [left, wide] }, { +: [col_who, 20.0] }] }, { call: [parts.get, 2] }, 0x8796A8FF] }] }
+                      - if: { condition: { eq: [idx, 0] }, then: [{ call: [<.text, { -: [{ +: [left, wide] }, 80.0] }, { +: [ypos, 7.0] }, "newest", 0x66CC88FF] }] }
+                      - set: [ypos, { +: [ypos, row_h] }]
+                      - call: [<.rule, { +: [left, 14.0] }, ypos, { -: [wide, 28.0] }]
                       - set: [idx, { +: [idx, 1] }]
 
           - def:
               name: generic_list
+              args: [[left, f32], [top, f32], [wide, f32], [tall, f32]]
               body:
-                - call: [ui.label, "generic/${<.store.prefix}"]
+                - call: [<.panel, left, top, wide, tall, ""]
+                - decl: [where, string, "generic"]
+                - if: { condition: { gt: [<.store.prefix.len, 0] }, then: [{ set: [where, "generic / ${<.store.prefix}"] }] }
+                - call: [<.text_big, { +: [left, 20.0] }, { +: [top, 16.0] }, { call: [<.fit, where, { -: [wide, 140.0] }] }, 0xE8C060FF]
                 - if:
                     condition: { gt: [<.store.prefix.len, 0] }
                     then:
-                      - if: { condition: { eq: [{ call: [ui.button, ".."] }, 1] }, then: [{ call: [<.store.ask, "browse_up", ""] }] }
-                - decl: [didx, i32, 0]
+                      - decl: [up_w, f32, { call: [<.button_w, "Up"] }]
+                      - if: { condition: { eq: [{ call: [<.button, { -: [{ +: [left, wide] }, { +: [up_w, 16.0] }] }, { +: [top, 14.0] }, up_w, 30.0, "Up", 0] }, 1] }, then: [{ call: [<.store.ask, "browse_up", ""] }] }
+                - decl: [ypos, f32, { +: [top, 62.0] }]
+                - decl: [col_size, f32, { +: [left, { "*": [wide, 0.7] }] }]
+                - call: [<.text, { +: [left, 20.0] }, ypos, "NAME", 0x8796A8FF]
+                - call: [<.text, col_size, ypos, "SIZE", 0x8796A8FF]
+                - set: [ypos, { +: [ypos, 24.0] }]
+                - call: [<.rule, { +: [left, 14.0] }, ypos, { -: [wide, 28.0] }]
+                - decl: [row_h, f32, 30.0]
+                - decl: [dirs, i32, <.store.dirs.len]
+                - decl: [count, i32, { +: [dirs, <.store.files.len] }]
+                - decl: [list_h, f32, { -: [{ +: [top, tall] }, { +: [ypos, 10.0] }] }]
+                - decl: [fits, i32, { cast: [{ /: [list_h, row_h] }, i32] }]
+                - set: [<.gen_scroll, { call: [<.scrolled, <.gen_scroll, count, fits, left, ypos, wide, list_h] }]
+                - if: { condition: { eq: [count, 0] }, then: [{ call: [<.text, { +: [left, 20.0] }, { +: [ypos, 10.0] }, "Empty", 0x8796A8FF] }] }
+                - decl: [idx, i32, <.gen_scroll]
                 - while:
-                    condition: { lt: [didx, <.store.dirs.len] }
+                    condition: { and: [{ lt: [idx, count] }, { le: [{ +: [ypos, row_h] }, { +: [top, tall] }] }] }
                     body:
-                      - decl: [dir, string, { call: [<.store.dirs.get, didx] }]
-                      - if: { condition: { eq: [{ call: [ui.button, "${dir}/"] }, 1] }, then: [{ call: [<.store.ask, "browse", dir] }] }
-                      - set: [didx, { +: [didx, 1] }]
-                - decl: [fidx, i32, 0]
-                - while:
-                    condition: { lt: [fidx, <.store.files.len] }
-                    body:
-                      - call: [ui.label, { call: [<.store.files.get, fidx] }]
-                      - set: [fidx, { +: [fidx, 1] }]
+                      - if:
+                          condition: { lt: [idx, dirs] }
+                          then:
+                            - decl: [dir, string, { call: [<.store.dirs.get, idx] }]
+                            - if: { condition: { eq: [{ call: [<.hover, left, ypos, wide, row_h] }, 1] }, then: [{ call: [<.fill, { +: [left, 6.0] }, ypos, { -: [wide, 12.0] }, row_h, 0x16202EFF] }] }
+                            # the entry is the whole prefix; the row shows its last part
+                            - decl: [shown, string, dir]
+                            - decl: [base_len, i32, <.store.prefix.len]
+                            - if: { condition: { and: [{ gt: [base_len, 0] }, { gt: [dir.len, base_len] }] }, then: [{ set: [shown, { call: [dir.substr, { +: [base_len, 1] }] }] }] }
+                            - call: [<.row_text, { +: [left, 20.0] }, ypos, row_h, { -: [wide, 40.0] }, "${shown}/", 0x8FC7FFFF]
+                            - if: { condition: { eq: [{ call: [<.hit, left, ypos, wide, row_h] }, 1] }, then: [{ call: [<.store.ask, "browse", dir] }] }
+                          else:
+                            - decl: [row_line, string, { call: [<.store.files.get, { -: [idx, dirs] }] }]
+                            - decl: [parts, list<string>, { call: [row_line.split, "   "] }]
+                            - decl: [fname, string, ""]
+                            - if: { condition: { gt: [parts.len, 0] }, then: [{ set: [fname, { call: [parts.get, 0] }] }] }
+                            - decl: [base_len, i32, <.store.prefix.len]
+                            - if: { condition: { and: [{ gt: [base_len, 0] }, { gt: [fname.len, base_len] }] }, then: [{ set: [fname, { call: [fname.substr, { +: [base_len, 1] }] }] }] }
+                            - call: [<.row_text, { +: [left, 20.0] }, ypos, row_h, { -: [col_size, { +: [left, 32.0] }] }, fname, 0xDFE6EFFF]
+                            - if: { condition: { gt: [parts.len, 1] }, then: [{ call: [<.row_text, col_size, ypos, row_h, { -: [{ +: [left, wide] }, { +: [col_size, 20.0] }] }, { call: [parts.get, 1] }, 0x8796A8FF] }] }
+                      - set: [ypos, { +: [ypos, row_h] }]
+                      - call: [<.rule, { +: [left, 14.0] }, ypos, { -: [wide, 28.0] }]
+                      - set: [idx, { +: [idx, 1] }]
 
           - def:
               name: users_page
+              args: [[left, f32], [top, f32], [wide, f32], [tall, f32]]
               body:
-                - decl: [cols, buffer<f32>, [1.0, 0.4]]
-                - decl: [rows, buffer<f32>, [1.0]]
-                - call: [ui.set_gap, 16.0, 8.0]
-                - call: [ui.begin_grid, cols, rows]
-                - call: [ui.set_scroll, "y"]
-                - call: [ui.begin_cell, 0, 0, 1, 1]
-                - decl: [idx, i32, 0]
+                - decl: [form_w, f32, 380.0]
+                - decl: [list_w, f32, { -: [wide, { +: [form_w, 12.0] }] }]
+                - call: [<.panel, left, top, list_w, tall, "Users"]
+                - decl: [ypos, f32, { +: [top, 40.0] }]
+                - decl: [col_roles, f32, { +: [left, { "*": [list_w, 0.35] }] }]
+                - decl: [del_w, f32, { call: [<.button_w, "Delete"] }]
+                - decl: [edit_w, f32, { call: [<.button_w, "Edit"] }]
+                - decl: [col_act, f32, { -: [{ +: [left, list_w] }, { +: [{ +: [del_w, edit_w] }, 28.0] }] }]
+                - call: [<.text, { +: [left, 20.0] }, ypos, "NAME", 0x8796A8FF]
+                - call: [<.text, col_roles, ypos, "ROLES", 0x8796A8FF]
+                - set: [ypos, { +: [ypos, 24.0] }]
+                - call: [<.rule, { +: [left, 14.0] }, ypos, { -: [list_w, 28.0] }]
+                - decl: [row_h, f32, 40.0]
+                - decl: [count, i32, <.store.users.len]
+                - decl: [list_h, f32, { -: [{ +: [top, tall] }, { +: [ypos, 10.0] }] }]
+                - decl: [fits, i32, { cast: [{ /: [list_h, row_h] }, i32] }]
+                - set: [<.user_scroll, { call: [<.scrolled, <.user_scroll, count, fits, left, ypos, list_w, list_h] }]
+                - decl: [idx, i32, <.user_scroll]
                 - while:
-                    condition: { lt: [idx, <.store.users.len] }
+                    condition: { and: [{ lt: [idx, count] }, { le: [{ +: [ypos, row_h] }, { +: [top, tall] }] }] }
                     body:
                       - decl: [name, string, { call: [<.store.users.get, idx] }]
-                      - call: [ui.label, "${name}   ${{ call: [<.store.user_roles.get, idx] }}"]
-                      - call: [ui.same_line]
-                      - if: { condition: { eq: [{ call: [ui.button, "Edit ${name}"] }, 1] }, then: [{ set: [<.store.form_name, name] }, { set: [<.store.form_roles, { call: [<.store.user_roles.get, idx] }] }] }
-                      - call: [ui.same_line]
-                      - if: { condition: { eq: [{ call: [ui.button, "Delete ${name}"] }, 1] }, then: [{ call: [<.store.ask, "delete_user", name] }] }
+                      - decl: [roles, string, { call: [<.store.user_roles.get, idx] }]
+                      - call: [<.row_text, { +: [left, 20.0] }, ypos, row_h, { -: [col_roles, { +: [left, 32.0] }] }, name, 0xDFE6EFFF]
+                      - call: [<.row_text, col_roles, ypos, row_h, { -: [col_act, { +: [col_roles, 12.0] }] }, roles, 0x8FC7FFFF]
+                      - if:
+                          condition: { eq: [{ call: [<.button, col_act, { +: [ypos, 6.0] }, edit_w, 28.0, "Edit", 0] }, 1] }
+                          then:
+                            - set: [<.store.form_name, name]
+                            - set: [<.store.form_roles, roles]
+                            - set: [<.store.form_password, ""]
+                            - set: [<.form_gen, { +: [<.form_gen, 1] }]
+                      - if: { condition: { eq: [{ call: [<.button, { +: [col_act, { +: [edit_w, 8.0] }] }, { +: [ypos, 6.0] }, del_w, 28.0, "Delete", 2] }, 1] }, then: [{ call: [<.store.ask, "delete_user", name] }] }
+                      - set: [ypos, { +: [ypos, row_h] }]
+                      - call: [<.rule, { +: [left, 14.0] }, ypos, { -: [list_w, 28.0] }]
                       - set: [idx, { +: [idx, 1] }]
-                - call: [ui.end_cell]
-                - call: [ui.begin_cell, 1, 0, 1, 1]
-                - call: [ui.label, "New or changed user"]
-                - call: [ui.label, "Name"]
-                - set: [<.store.form_name, { call: [ui.text_input, "form_name", <.store.form_name] }]
-                - call: [ui.label, "Password"]
-                - set: [<.store.form_password, { call: [ui.password_input, "form_password", <.store.form_password] }]
-                - call: [ui.label, "Roles (comma separated)"]
-                - set: [<.store.form_roles, { call: [ui.text_input, "form_roles", <.store.form_roles] }]
-                - if: { condition: { eq: [{ call: [ui.button, "Save user"] }, 1] }, then: [{ call: [<.store.ask, "save_user", ""] }] }
-                - call: [ui.end_cell]
-                - call: [ui.end_grid]
+                # the form
+                - decl: [form_left, f32, { +: [left, { +: [list_w, 12.0] }] }]
+                - call: [<.panel, form_left, top, form_w, tall, "New or changed user"]
+                - decl: [inner, f32, { +: [form_left, 20.0] }]
+                - decl: [inner_w, f32, { -: [form_w, 40.0] }]
+                - set: [<.store.form_name, { call: [<.field, inner, { +: [top, 44.0] }, inner_w, "Name", "form_name", <.store.form_name, 0] }]
+                - set: [<.store.form_password, { call: [<.field, inner, { +: [top, 110.0] }, inner_w, "Password (empty keeps it)", "form_password", <.store.form_password, 1] }]
+                - set: [<.store.form_roles, { call: [<.field, inner, { +: [top, 176.0] }, inner_w, "Roles, comma separated", "form_roles", <.store.form_roles, 0] }]
+                - call: [<.text, inner, { +: [top, 236.0] }, "reader, publisher, admin", 0x5F6E80FF]
+                - decl: [new_w, f32, { call: [<.button_w, "Clear"] }]
+                - if: { condition: { eq: [{ call: [<.button, inner, { +: [top, 266.0] }, { -: [inner_w, { +: [new_w, 8.0] }] }, 36.0, "Save user", 1] }, 1] }, then: [{ call: [<.store.ask, "save_user", ""] }] }
+                - if:
+                    condition: { eq: [{ call: [<.button, { -: [{ +: [inner, inner_w] }, new_w] }, { +: [top, 266.0] }, new_w, 36.0, "Clear", 0] }, 1] }
+                    then:
+                      - set: [<.store.form_name, ""]
+                      - set: [<.store.form_password, ""]
+                      - set: [<.store.form_roles, "reader"]
+                      - set: [<.form_gen, { +: [<.form_gen, 1] }]
 
           - def:
               name: retention_page
+              args: [[left, f32], [top, f32], [wide, f32], [tall, f32]]
               body:
-                - decl: [cols, buffer<f32>, [1.0, 0.4]]
-                - decl: [rows, buffer<f32>, [1.0]]
-                - call: [ui.set_gap, 16.0, 8.0]
-                - call: [ui.begin_grid, cols, rows]
-                - call: [ui.begin_cell, 0, 0, 1, 1]
-                - call: [ui.label, "Policy (JSON or YAML)"]
-                - set: [<.store.policy, { call: [ui.text_area, "policy", <.store.policy] }]
-                - if: { condition: { eq: [{ call: [ui.button, "Preview"] }, 1] }, then: [{ call: [<.store.ask, "preview_policy", ""] }] }
-                - call: [ui.same_line]
-                - if: { condition: { eq: [{ call: [ui.button, "Save"] }, 1] }, then: [{ call: [<.store.ask, "save_policy", ""] }] }
-                - call: [ui.same_line]
-                - if: { condition: { eq: [{ call: [ui.button, "Run now"] }, 1] }, then: [{ call: [<.store.ask, "run_retention", ""] }] }
-                - call: [ui.end_cell]
-                - call: [ui.set_scroll, "y"]
-                - call: [ui.begin_cell, 1, 0, 1, 1]
-                - call: [ui.label, "Would delete"]
+                - decl: [half, f32, { /: [{ -: [wide, 12.0] }, 2.0] }]
+                - call: [<.panel, left, top, half, tall, "Policy"]
+                - decl: [inner, f32, { +: [left, 20.0] }]
+                - decl: [inner_w, f32, { -: [half, 40.0] }]
+                - set: [<.store.policy, { call: [<.field, inner, { +: [top, 44.0] }, inner_w, "JSON or YAML; Preview shows what it would delete, nothing is deleted", "policy", <.store.policy, 0] }]
+                - decl: [btn_x, f32, inner]
+                - decl: [btn_y, f32, { +: [top, 112.0] }]
+                - decl: [pre_w, f32, { call: [<.button_w, "Preview"] }]
+                - if: { condition: { eq: [{ call: [<.button, btn_x, btn_y, pre_w, 34.0, "Preview", 0] }, 1] }, then: [{ call: [<.store.ask, "preview_policy", ""] }] }
+                - set: [btn_x, { +: [btn_x, { +: [pre_w, 8.0] }] }]
+                - decl: [save_w, f32, { call: [<.button_w, "Save"] }]
+                - if: { condition: { eq: [{ call: [<.button, btn_x, btn_y, save_w, 34.0, "Save", 1] }, 1] }, then: [{ call: [<.store.ask, "save_policy", ""] }] }
+                - decl: [run_w, f32, { call: [<.button_w, "Run now"] }]
+                - if: { condition: { eq: [{ call: [<.button, { -: [{ +: [inner, inner_w] }, run_w] }, btn_y, run_w, 34.0, "Run now", 2] }, 1] }, then: [{ call: [<.store.ask, "run_retention", ""] }] }
+                # the preview
+                - decl: [ypos, f32, { +: [top, 172.0] }]
+                - call: [<.rule, { +: [left, 1.0] }, { -: [ypos, 12.0] }, { -: [half, 2.0] }]
+                - call: [<.text, inner, ypos, "WOULD DELETE", 0x8796A8FF]
+                - set: [ypos, { +: [ypos, 26.0] }]
+                - decl: [pcount, i32, <.store.preview.len]
+                - if: { condition: { eq: [pcount, 0] }, then: [{ call: [<.text, inner, ypos, "Nothing yet. Press Preview.", 0x5F6E80FF] }] }
                 - decl: [pidx, i32, 0]
                 - while:
-                    condition: { lt: [pidx, <.store.preview.len] }
+                    condition: { and: [{ lt: [pidx, pcount] }, { le: [{ +: [ypos, 26.0] }, { +: [top, tall] }] }] }
                     body:
-                      - call: [ui.label, { call: [<.store.preview.get, pidx] }]
+                      - call: [<.dot, inner, { +: [ypos, 6.0] }, 0xDD6655FF]
+                      - call: [<.text_fit, { +: [inner, 16.0] }, ypos, { -: [inner_w, 16.0] }, { call: [<.store.preview.get, pidx] }, 0xDFE6EFFF]
+                      - set: [ypos, { +: [ypos, 26.0] }]
                       - set: [pidx, { +: [pidx, 1] }]
-                - call: [ui.separator]
-                - call: [ui.label, "Runs"]
+                # the runs
+                - decl: [run_left, f32, { +: [left, { +: [half, 12.0] }] }]
+                - call: [<.panel, run_left, top, half, tall, "Past runs"]
+                - decl: [run_y, f32, { +: [top, 40.0] }]
+                - decl: [col_trig, f32, { +: [run_left, { "*": [half, 0.4] }] }]
+                - decl: [col_del, f32, { +: [run_left, { "*": [half, 0.7] }] }]
+                - call: [<.text, { +: [run_left, 20.0] }, run_y, "RUN", 0x8796A8FF]
+                - call: [<.text, col_trig, run_y, "TRIGGER", 0x8796A8FF]
+                - call: [<.text, col_del, run_y, "DELETED", 0x8796A8FF]
+                - set: [run_y, { +: [run_y, 24.0] }]
+                - call: [<.rule, { +: [run_left, 14.0] }, run_y, { -: [half, 28.0] }]
+                - decl: [rcount, i32, <.store.runs.len]
+                - if: { condition: { eq: [rcount, 0] }, then: [{ call: [<.text, { +: [run_left, 20.0] }, { +: [run_y, 10.0] }, "No runs yet", 0x5F6E80FF] }] }
                 - decl: [ridx, i32, 0]
                 - while:
-                    condition: { lt: [ridx, <.store.runs.len] }
+                    condition: { and: [{ lt: [ridx, rcount] }, { le: [{ +: [run_y, 30.0] }, { +: [top, tall] }] }] }
                     body:
-                      - call: [ui.label, { call: [<.store.runs.get, ridx] }]
+                      - decl: [row_line, string, { call: [<.store.runs.get, ridx] }]
+                      - decl: [parts, list<string>, { call: [row_line.split, "   "] }]
+                      - if: { condition: { gt: [parts.len, 0] }, then: [{ call: [<.row_text, { +: [run_left, 20.0] }, run_y, 30.0, { -: [col_trig, { +: [run_left, 32.0] }] }, { call: [parts.get, 0] }, 0xDFE6EFFF] }] }
+                      - if: { condition: { gt: [parts.len, 1] }, then: [{ call: [<.row_text, col_trig, run_y, 30.0, { -: [col_del, { +: [col_trig, 12.0] }] }, { call: [parts.get, 1] }, 0x8796A8FF] }] }
+                      - if: { condition: { gt: [parts.len, 2] }, then: [{ call: [<.row_text, col_del, run_y, 30.0, { -: [{ +: [run_left, half] }, { +: [col_del, 20.0] }] }, { call: [parts.get, 2] }, 0x8796A8FF] }] }
+                      - set: [run_y, { +: [run_y, 30.0] }]
+                      - call: [<.rule, { +: [run_left, 14.0] }, run_y, { -: [half, 28.0] }]
                       - set: [ridx, { +: [ridx, 1] }]
-                - call: [ui.end_cell]
-                - call: [ui.end_grid]
 
           - def:
               name: settings_page
+              args: [[left, f32], [top, f32], [wide, f32], [tall, f32]]
               body:
-                - decl: [cols, buffer<f32>, [1.0]]
-                - decl: [rows, buffer<f32>, [1.0]]
-                - call: [ui.begin_grid, cols, rows]
-                - call: [ui.begin_cell, 0, 0, 1, 1]
-                - call: [ui.label, "Settings (JSON; keys here override kontor.yaml)"]
-                - set: [<.store.settings, { call: [ui.text_area, "settings", <.store.settings] }]
-                - if: { condition: { eq: [{ call: [ui.button, "Save settings"] }, 1] }, then: [{ call: [<.store.ask, "save_settings", ""] }] }
-                - call: [ui.end_cell]
-                - call: [ui.end_grid]
+                - decl: [panel_h, f32, 200.0]
+                - call: [<.panel, left, top, wide, panel_h, "Settings"]
+                - decl: [inner, f32, { +: [left, 20.0] }]
+                - decl: [inner_w, f32, { -: [wide, 40.0] }]
+                - set: [<.store.settings, { call: [<.field, inner, { +: [top, 44.0] }, inner_w, "JSON; keys set here override kontor.yaml", "settings", <.store.settings, 0] }]
+                - decl: [save_w, f32, { call: [<.button_w, "Save settings"] }]
+                - if: { condition: { eq: [{ call: [<.button, inner, { +: [top, 112.0] }, save_w, 34.0, "Save settings", 1] }, 1] }, then: [{ call: [<.store.ask, "save_settings", ""] }] }
+                - call: [<.text, inner, { +: [top, 160.0] }, "Keys: public_url, anonymous (role of callers without a token), session_hours, roles", 0x5F6E80FF]
 
           # One frame of the whole page.
           - def:
@@ -951,6 +1354,12 @@
               body:
                 - decl: [mouse_x, f32, { call: [input.mouse_pos_x] }]
                 - decl: [mouse_y, f32, { call: [input.mouse_pos_y] }]
+                - set: [<.mouse_x, mouse_x]
+                - set: [<.mouse_y, mouse_y]
+                - set: [<.released, 0]
+                - if: { condition: { call: [input.mouse_released, 0] }, then: [{ set: [<.released, 1] }] }
+                - decl: [wheel, vec2, { call: [input.mouse_scroll] }]
+                - set: [<.wheel, wheel.y]
                 - call: [engine.update_hover, mouse_x, mouse_y]
                 - decl: [mbtn, i32, { call: [input.mouse_button, 0] }]
                 - decl: [mrel, i32, { call: [input.mouse_released, 0] }]
@@ -959,29 +1368,67 @@
                 - decl: [fb_w, i32, fb_size.x]
                 - decl: [fb_h, i32, fb_size.y]
                 - if: { condition: { and: [{ gt: [fb_w, 0] }, { gt: [fb_h, 0] }] }, then: [{ call: [gl.viewport, 0, 0, fb_w, fb_h] }] }
-                - call: [gl.clear_all, 0.97, 0.97, 0.98, 1.0]
+                - decl: [win_size, ivec2, { call: [engine.window_size, <.win] }]
+                - if: { condition: { gt: [win_size.x, 0] }, then: [{ set: [<.width, win_size.x] }, { set: [<.height, win_size.y] }, { set: [<.width_f, { cast: [win_size.x, f32] }] }, { set: [<.height_f, { cast: [win_size.y, f32] }] }] }
+                # a page that is shown anew gets fresh text fields (see field)
+                - if: { condition: { neq: [<.store.page, <.shown_page] }, then: [{ set: [<.shown_page, <.store.page] }, { set: [<.form_gen, { +: [<.form_gen, 1] }] }] }
+                - call: [gl.clear_all, 0.039, 0.051, 0.078, 1.0]
                 - call: [ui.begin, <.win]
-                - decl: [cols, buffer<f32>, [1.0]]
-                - decl: [rows, buffer<f32>, [0.07, 1.0, 0.05]]
-                - call: [ui.set_gap, 0.0, 6.0]
-                - call: [ui.begin_grid, cols, rows]
-                - call: [ui.begin_cell, 0, 0, 1, 1]
                 - call: [<.header]
-                - call: [ui.end_cell]
-                - call: [ui.begin_cell, 0, 1, 1, 1]
+                - decl: [left, f32, 20.0]
+                - decl: [top, f32, 68.0]
+                - decl: [wide, f32, { -: [<.width_f, 40.0] }]
+                - decl: [tall, f32, { -: [<.height_f, { +: [68.0, 46.0] }] }]
                 - decl: [page, i32, <.store.page]
-                - if: { condition: { eq: [page, 0] }, then: [{ call: [<.overview_page] }] }
-                - if: { condition: { eq: [page, 1] }, then: [{ call: [<.users_page] }] }
-                - if: { condition: { eq: [page, 2] }, then: [{ call: [<.retention_page] }] }
-                - if: { condition: { eq: [page, 3] }, then: [{ call: [<.settings_page] }] }
+                - if: { condition: { eq: [page, 0] }, then: [{ call: [<.overview_page, left, top, wide, tall] }] }
+                - if: { condition: { eq: [page, 1] }, then: [{ call: [<.users_page, left, top, wide, tall] }] }
+                - if: { condition: { eq: [page, 2] }, then: [{ call: [<.retention_page, left, top, wide, tall] }] }
+                - if: { condition: { eq: [page, 3] }, then: [{ call: [<.settings_page, left, top, wide, tall] }] }
                 - if: { condition: { eq: [page, 4] }, then: [{ call: [<.login_page] }] }
-                - call: [ui.end_cell]
-                - call: [ui.set_align, "left", "middle"]
-                - call: [ui.begin_cell, 0, 2, 1, 1]
-                - call: [ui.label, "${<.store.message}"]
-                - call: [ui.end_cell]
-                - call: [ui.end_grid]
+                - call: [<.footer]
                 - call: [ui.end]
+
+          # Fonts and the widget styles; after ui.init.  The font comes from
+          # the asset bundle (ui/assets/fonts/ui.ttf, build.sh); without it
+          # (a native run without --asset-roots) aiml's built-in font.
+          - def:
+              name: setup_style
+              body:
+                - decl: [stem, string, "ui"]
+                - decl: [font, ui_font, { call: [gl.font, stem, 15.0] }]
+                - if: { condition: { peq: [font, null] }, then: [{ set: [font, { call: [ui.load_font_default, 16.0] }] }] }
+                - if: { condition: { neq: [font, null] }, then: [{ call: [ui.set_default_font, font] }] }
+                - decl: [big, ui_font, { call: [gl.font, stem, 22.0] }]
+                - decl: [theme, ui_style]
+                - set: [theme.color, 0xDFE6EFFF]
+                - set: [theme.bg_color, 0x0A0D14FF]
+                - set: [theme.hover_color, 0x16202EFF]
+                - set: [theme.active_color, 0x16202EFF]
+                - set: [theme.border_color, 0x2C3A50FF]
+                - set: [theme.border_width, 1.0]
+                - set: [theme.corner_radius, 4.0]
+                - set: [theme.font_size, 15.0]
+                - set: [theme.padding_h, 10.0]
+                - set: [theme.padding_v, 8.0]
+                - set: [theme.opacity, 1.0]
+                - set: [theme.size_w, -1.0]
+                - set: [theme.size_h, -1.0]
+                - if: { condition: { neq: [font, null] }, then: [{ set: [theme.font, font] }] }
+                - call: [ui.set_default_style, theme]
+                - decl: [bare, ui_style]
+                - set: [bare.color, 0xDFE6EFFF]
+                - set: [bare.bg_color, 0x00000000]
+                - set: [bare.border_color, 0x00000000]
+                - set: [bare.border_width, 0.0]
+                - set: [bare.opacity, 1.0]
+                - set: [bare.font_size, 15.0]
+                - set: [bare.size_w, -1.0]
+                - set: [bare.size_h, -1.0]
+                - set: [<.bare, bare]
+                - set: [<.input_style, { call: [ui.label_style_new] }]
+                - call: [<.input_style.set_size_h, 34.0]
+                - set: [<.big_style, { call: [ui.label_style_new] }]
+                - if: { condition: { neq: [big, null] }, then: [{ call: [<.big_style.set_font, big] }] }
 
           # The browser loop (no engine.run: its callbacks are free functions
           # and would need a global anchor).  On wasm32 the sleep yields to the
@@ -996,8 +1443,7 @@
                 - call: [gl.enable_blend]
                 - call: [ui.init]
                 - call: [input.init, <.win]
-                - decl: [font, ui_font, { call: [ui.load_font_default, 16.0] }]
-                - if: { condition: { neq: [font, null] }, then: [{ call: [ui.set_default_font, font] }] }
+                - call: [<.setup_style]
                 - call: [<.store.start]
                 - decl: [web, i32, 0]
                 - if: { condition: { eq: [{ call: [engine.is_web] }, 1] }, then: [{ set: [web, 1] }] }

@@ -1,6 +1,7 @@
 #!/bin/bash
 # Builds kontor's web UI (doc/spec/web_ui.md §8) into ui/dist/:
-# index.html, boot.js, kontor-ui.js, kontor-ui.wasm.
+# index.html, boot.js, kontor-ui.js, kontor-ui.wasm, kontor-ui.data (the
+# font in ui/assets/).
 #
 #   ui/build.sh                  needs $AIML_VENV (an aiml venv whose
 #                                lib/wasm32 holds the wasm32 runtime, aiml
@@ -22,14 +23,17 @@ BUILD="$(mktemp -d)"
 trap 'rm -rf "$BUILD"' EXIT
 rm -rf "$OUT"; mkdir -p "$OUT"
 
-"$AIML" main.aiml --target wasm32 --emit-main -o "$BUILD/kontor-ui.ll"
+# assets/ (the UI font) is registered by stem at compile time (aiml
+# spec/44_7) and preloaded into the bundle, where gl.font finds it.
+"$AIML" main.aiml --target wasm32 --emit-main --asset-roots=assets -o "$BUILD/kontor-ui.ll"
 # The imports (kontor_ui.aiml, ../lib/text.aiml) come out as .ll files of
 # their own next to the main one; all of them go into the link.
 "$EMCC" "$BUILD"/*.ll -o "$OUT/kontor-ui.js" \
     -L"$WASM_LIB" -laiml_wasm -fexceptions -O2 \
     -sASYNCIFY=1 -sASYNCIFY_STACK_SIZE=1048576 -sSTACK_SIZE=8388608 \
     -sALLOW_MEMORY_GROWTH=1 -sENVIRONMENT=web \
-    -sMAX_WEBGL_VERSION=2 -sMIN_WEBGL_VERSION=2 -sFULL_ES3=1
+    -sMAX_WEBGL_VERSION=2 -sMIN_WEBGL_VERSION=2 -sFULL_ES3=1 \
+    --preload-file=assets
 cp web/index.html web/boot.js "$OUT/"
 
 size=$(gzip -c "$OUT/kontor-ui.wasm" | wc -c)

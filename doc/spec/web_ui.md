@@ -278,6 +278,29 @@ an aiml program, `ui/kontor_ui.aiml`, drawn with aiml's UI widgets
   Escape closes a dialog).
 - **FW-83** Size budget: the wasm file ≤ 3 MiB gzip-compressed; first
   render ≤ 2 s on a local network.
+- **FW-84** **Look** (owner, 2026-11-26: "Layout reparieren und auf eine
+  ordentliche Farb- und Layoutsprache bringen"): the dark palette of cosmos
+  (background `#0A0D14`, panels `#111824` with a `#243043` border, text
+  `#DFE6EF`, captions `#8796A8`, accent `#E8C060`; green, red and yellow as
+  in cosmos' run states). A header with the tabs (active one underlined in
+  the accent) and the account on the right; a footer with the last message
+  and the transfer state; pages made of panels with an upper-case caption,
+  lists as tables with column captions and a rule between rows.
+- **FW-85** Layout is drawn, not flowed: the view draws with
+  `ui.draw_rect`/`ui.draw_text` at window pixels and tests its own clicks;
+  only the text fields are aiml widgets, each in a grid cell of its own.
+  Reason (measured with aiml 1.0.2.8): a grid widget is as wide as its
+  cell, `ui.same_line` places the next widget on top of the previous one,
+  and a cell paints a default background — the first UI showed one button
+  of each row and hid the rest. A field whose value the program changes
+  (Edit, a page loaded again) gets a new widget id, because aiml keeps a
+  text field's buffer by id and ignores the value passed in later.
+- **FW-86** The UI font is `ui/assets/fonts/ui.ttf` (DejaVu Sans, its
+  license allows redistribution), found by stem through the asset registry
+  (aiml spec/44_7) and preloaded into the bundle (`kontor-ui.data`). Without
+  it (a native run without `--asset-roots`) the UI falls back to aiml's
+  built-in font. `boot.js` sizes the canvas' backing store to the page, one
+  pixel per CSS pixel: the engine reads that size as the window size.
 
 It needs from aiml (tracked there, spec first):
 
