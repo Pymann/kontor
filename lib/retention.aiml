@@ -1,0 +1,505 @@
+# kontor.retention — which stored objects a retention policy deletes
+# (doc/spec/web_ui.md §5, FW-40…FW-43).
+#
+# The Planner is pure: the caller adds the objects (repo, name, version,
+# published_ms, bytes), the exact-version dependencies of newest manifests
+# (pin) and the protected objects, sets the policy text and asks for the plan
+# at a given time.  Deleting is the caller's business (FW-45…FW-47).
+#
+#   repo      exodus | generic | oci
+#   name      project / generic path / OCI repository
+#   version   exodus version / "" (generic) / OCI tag or "sha256:…" (untagged)
+#
+# Reasons in the kept list: newest, dependency, protected, no_rule,
+# keep_last, max_age.
+
+- namespace: kontor.retention
+
+- import: "text.aiml"
+
+# "1" when every character of `text` is a decimal digit (and it is not empty).
+- def:
+    name: all_digits
+    args: [[text, string]]
+    return: i32
+    body:
+      - if:
+          condition: { eq: [text.len, 0] }
+          then:
+            - return: [0]
+      - decl: [digits, string, "0123456789"]
+      - decl: [idx, i32, 0]
+      - while:
+          condition: { lt: [idx, text.len] }
+          body:
+            - decl: [one, string, { call: [text.substr, idx, 1] }]
+            - if:
+                condition: { lt: [{ call: [digits.index_of, one] }, 0] }
+                then:
+                  - return: [0]
+            - set: [idx, { +: [idx, 1] }]
+      - return: [1]
+
+# "" for a valid "HH:MM" (00:00…23:59) or "", else the error.
+- def:
+    name: check_schedule
+    args: [[text, string]]
+    return: string
+    body:
+      - if:
+          condition: { eq: [text.len, 0] }
+          then:
+            - return: [""]
+      - decl: [bad, string, "schedule: '${text}' is not HH:MM (UTC, 00:00…23:59)"]
+      - if:
+          condition: { neq: [text.len, 5] }
+          then:
+            - return: [bad]
+      - decl: [hours, string, { call: [text.substr, 0, 2] }]
+      - decl: [sep, string, { call: [text.substr, 2, 1] }]
+      - decl: [minutes, string, { call: [text.substr, 3, 2] }]
+      - if:
+          condition: { or: [{ neq: [sep, ":"] }, { eq: [{ call: [kontor.retention.all_digits, hours] }, 0] }, { eq: [{ call: [kontor.retention.all_digits, minutes] }, 0] }] }
+          then:
+            - return: [bad]
+      - decl: [hnum, i64, hours]
+      - decl: [mnum, i64, minutes]
+      - if:
+          condition: { or: [{ gt: [hnum, 23] }, { gt: [mnum, 59] }] }
+          then:
+            - return: [bad]
+      - return: [""]
+
+- class:
+    name: Planner
+    members:
+      - [day_ms, i64, 86400000, { const: true }]
+      - [schedule, string, "", { access: public }]
+      # rules, one entry per rule; -1 = not set
+      - [r_repo, list<string>, null]
+      - [r_match, list<string>, null]
+      - [r_keep, list<i64>, null]
+      - [r_age, list<i64>, null]
+      - [r_untagged, list<i64>, null]
+      # objects
+      - [o_repo, list<string>, null]
+      - [o_name, list<string>, null]
+      - [o_version, list<string>, null]
+      - [o_ms, list<i64>, null]
+      - [o_bytes, list<i64>, null]
+      # "name\tversion" pinned by a newest manifest; "repo\tname\tversion" protected
+      - [pins, list<string>, null]
+      - [protected, list<string>, null]
+    methods:
+      - def:
+          name: rule_count
+          return: i32
+          body:
+            - return: [<.r_repo.len]
+
+      - def:
+          name: clear_rules
+          body:
+            - set: [<.schedule, ""]
+            - call: [<.r_repo.clear]
+            - call: [<.r_match.clear]
+            - call: [<.r_keep.clear]
+            - call: [<.r_age.clear]
+            - call: [<.r_untagged.clear]
+
+      # A non-negative whole number from a rule field; -1 when absent,
+      # -2 when present but invalid.
+      - def:
+          name: number_field
+          args: [[rule, ref<yaml_node>], [key, string]]
+          return: i64
+          body:
+            - decl: [raw, string, { call: [yaml.scalar, { call: [yaml.get, rule, key] }] }]
+            - if:
+                condition: { eq: [raw.len, 0] }
+                then:
+                  - return: [-1]
+            - if:
+                condition: { eq: [{ call: [kontor.retention.all_digits, raw] }, 0] }
+                then:
+                  - return: [-2]
+            - decl: [num, i64, raw]
+            - return: [num]
+
+      # Validates the whole policy document and, only when it is valid,
+      # replaces the stored rules.  Returns "" or the first error with its
+      # path (FW-40).
+      - def:
+          name: set_policy
+          static_off: ["str_cmp"]
+          args: [[text, string]]
+          return: string
+          body:
+            - if:
+                condition: { eq: [{ call: [text.trim] }, ""] }
+                then:
+                  - call: [<.clear_rules]
+                  - return: [""]
+            - decl: [doc, ptr<yaml_doc>, { call: [yaml.parse, text] }]
+            - decl: [perr, string, { call: [yaml.error, doc] }]
+            - if:
+                condition: { gt: [perr.len, 0] }
+                then:
+                  - return: ["yaml: ${perr}"]
+            - decl: [root, ptr<yaml_node>, { call: [yaml.root, doc] }]
+            - decl: [sched, string, { call: [yaml.scalar, { call: [yaml.get, root, "schedule"] }] }]
+            - decl: [serr, string, { call: [kontor.retention.check_schedule, sched] }]
+            - if:
+                condition: { gt: [serr.len, 0] }
+                then:
+                  - return: [serr]
+            - decl: [rules, ref<yaml_node>, { call: [yaml.get, root, "rules"] }]
+            - decl: [count, i32, { call: [yaml.size, rules] }]
+            - decl: [repos, list<string>, []]
+            - decl: [matches, list<string>, []]
+            - decl: [keeps, list<i64>, []]
+            - decl: [ages, list<i64>, []]
+            - decl: [untagged, list<i64>, []]
+            - decl: [idx, i32, 0]
+            - while:
+                condition: { lt: [idx, count] }
+                body:
+                  - decl: [path, string, "rules[${idx}]"]
+                  - decl: [rule, ref<yaml_node>, { call: [yaml.item, rules, idx] }]
+                  - decl: [repo, string, { call: [yaml.scalar, { call: [yaml.get, rule, "repo"] }] }]
+                  - if:
+                      condition: { and: [{ neq: [repo, "exodus"] }, { neq: [repo, "generic"] }, { neq: [repo, "oci"] }] }
+                      then:
+                        - return: ["${path}.repo: '${repo}' is not exodus, generic or oci"]
+                  - decl: [pattern, string, { call: [yaml.scalar, { call: [yaml.get, rule, "match"] }] }]
+                  - if:
+                      condition: { eq: [pattern.len, 0] }
+                      then:
+                        - set: [pattern, "*"]
+                  - decl: [keep, i64, { call: [<.number_field, rule, "keep_last"] }]
+                  - if:
+                      condition: { eq: [keep, -2] }
+                      then:
+                        - return: ["${path}.keep_last: a whole number ≥ 0"]
+                  - decl: [age, i64, { call: [<.number_field, rule, "max_age_days"] }]
+                  - if:
+                      condition: { eq: [age, -2] }
+                      then:
+                        - return: ["${path}.max_age_days: a whole number ≥ 0"]
+                  - decl: [unt, i64, { call: [<.number_field, rule, "untagged_after_days"] }]
+                  - if:
+                      condition: { eq: [unt, -2] }
+                      then:
+                        - return: ["${path}.untagged_after_days: a whole number ≥ 0"]
+                  - if:
+                      condition: { and: [{ lt: [keep, 0] }, { lt: [age, 0] }, { lt: [unt, 0] }] }
+                      then:
+                        - return: ["${path}: needs keep_last, max_age_days or untagged_after_days"]
+                  - if:
+                      condition: { and: [{ eq: [repo, "generic"] }, { lt: [age, 0] }] }
+                      then:
+                        - return: ["${path}: a generic rule needs max_age_days (files have no versions)"]
+                  - if:
+                      condition: { and: [{ neq: [repo, "oci"] }, { ge: [unt, 0] }] }
+                      then:
+                        - return: ["${path}.untagged_after_days: only for oci rules"]
+                  - call: [repos.push, repo]
+                  - call: [matches.push, pattern]
+                  - call: [keeps.push, keep]
+                  - call: [ages.push, age]
+                  - call: [untagged.push, unt]
+                  - set: [idx, { +: [idx, 1] }]
+            - call: [<.clear_rules]
+            - set: [<.schedule, sched]
+            - decl: [cidx, i32, 0]
+            - while:
+                condition: { lt: [cidx, repos.len] }
+                body:
+                  - call: [<.r_repo.push, { call: [repos.get, cidx] }]
+                  - call: [<.r_match.push, { call: [matches.get, cidx] }]
+                  - call: [<.r_keep.push, { call: [keeps.get, cidx] }]
+                  - call: [<.r_age.push, { call: [ages.get, cidx] }]
+                  - call: [<.r_untagged.push, { call: [untagged.get, cidx] }]
+                  - set: [cidx, { +: [cidx, 1] }]
+            - return: [""]
+
+      - def:
+          name: add
+          args: [[repo, string], [name, string], [version, string], [published_ms, i64], [bytes, i64]]
+          body:
+            - call: [<.o_repo.push, repo]
+            - call: [<.o_name.push, name]
+            - call: [<.o_version.push, version]
+            - call: [<.o_ms.push, published_ms]
+            - call: [<.o_bytes.push, bytes]
+
+      # The newest manifest of another project depends on name@version exactly.
+      - def:
+          name: pin
+          args: [[name, string], [version, string]]
+          body:
+            - call: [<.pins.push, "${name}\t${version}"]
+
+      - def:
+          name: protect
+          args: [[repo, string], [name, string], [version, string]]
+          body:
+            - call: [<.protected.push, "${repo}\t${name}\t${version}"]
+
+      # Index of the first rule for object `obj`, or -1.
+      - def:
+          name: rule_for
+          args: [[obj, i32]]
+          return: i32
+          body:
+            - decl: [repo, string, { call: [<.o_repo.get, obj] }]
+            - decl: [name, string, { call: [<.o_name.get, obj] }]
+            - decl: [rule_idx, i32, 0]
+            - while:
+                condition: { lt: [rule_idx, <.r_repo.len] }
+                body:
+                  - if:
+                      condition: { and: [{ eq: [{ call: [<.r_repo.get, rule_idx] }, repo] }, { eq: [{ call: [io.glob_match, { call: [<.r_match.get, rule_idx] }, name] }, 1] }] }
+                      then:
+                        - return: [rule_idx]
+                  - set: [rule_idx, { +: [rule_idx, 1] }]
+            - return: [-1]
+
+      - def:
+          name: untagged
+          args: [[obj, i32]]
+          return: i32
+          body:
+            - decl: [version, string, { call: [<.o_version.get, obj] }]
+            - if:
+                condition: { and: [{ eq: [{ call: [<.o_repo.get, obj] }, "oci"] }, { eq: [{ call: [version.starts_with, "sha256:"] }, 1] }] }
+                then:
+                  - return: [1]
+            - return: [0]
+
+      # 1 when object `other` is newer than `obj` within the same group
+      # (exodus: same project, higher version; oci: same repository, a tag
+      # published later — the later added wins a tie).  Generic files have no
+      # group.
+      - def:
+          name: newer
+          static_off: ["str_cmp"]
+          args: [[other, i32], [obj, i32]]
+          return: i32
+          body:
+            - decl: [repo, string, { call: [<.o_repo.get, obj] }]
+            - if:
+                condition: { or: [{ eq: [other, obj] }, { eq: [repo, "generic"] }] }
+                then:
+                  - return: [0]
+            - decl: [other_repo, string, { call: [<.o_repo.get, other] }]
+            - decl: [other_name, string, { call: [<.o_name.get, other] }]
+            - decl: [name, string, { call: [<.o_name.get, obj] }]
+            - if:
+                condition: { or: [{ neq: [other_repo, repo] }, { neq: [other_name, name] }] }
+                then:
+                  - return: [0]
+            - if:
+                condition: { eq: [repo, "exodus"] }
+                then:
+                  - decl: [other_version, string, { call: [<.o_version.get, other] }]
+                  - decl: [version, string, { call: [<.o_version.get, obj] }]
+                  - decl: [order, i32, { call: [kontor.text.version_cmp, other_version, version] }]
+                  - if:
+                      condition: { gt: [order, 0] }
+                      then:
+                        - return: [1]
+                  - return: [0]
+            - if:
+                condition: { eq: [{ call: [<.untagged, other] }, 1] }
+                then:
+                  - return: [0]
+            - decl: [oms, i64, { call: [<.o_ms.get, other] }]
+            - decl: [ims, i64, { call: [<.o_ms.get, obj] }]
+            - if:
+                condition: { or: [{ gt: [oms, ims] }, { and: [{ eq: [oms, ims] }, { gt: [other, obj] }] }] }
+                then:
+                  - return: [1]
+            - return: [0]
+
+      # How many objects of the same group are newer than `obj` (0 = newest).
+      - def:
+          name: rank
+          args: [[obj, i32]]
+          return: i32
+          body:
+            - decl: [count, i32, 0]
+            - decl: [idx, i32, 0]
+            - while:
+                condition: { lt: [idx, <.o_repo.len] }
+                body:
+                  - set: [count, { +: [count, { call: [<.newer, idx, obj] }] }]
+                  - set: [idx, { +: [idx, 1] }]
+            - return: [count]
+
+      # The reason object `obj` is kept, or "" when the policy deletes it.
+      - def:
+          name: verdict
+          static_off: ["str_cmp"]
+          args: [[obj, i32], [rule, i32], [now_ms, i64]]
+          return: string
+          body:
+            - decl: [repo, string, { call: [<.o_repo.get, obj] }]
+            - decl: [name, string, { call: [<.o_name.get, obj] }]
+            - decl: [version, string, { call: [<.o_version.get, obj] }]
+            - decl: [is_untagged, i32, { call: [<.untagged, obj] }]
+            - decl: [place, i32, -1]
+            - if:
+                condition: { and: [{ neq: [repo, "generic"] }, { eq: [is_untagged, 0] }] }
+                then:
+                  - set: [place, { call: [<.rank, obj] }]
+            - if:
+                condition: { eq: [place, 0] }
+                then:
+                  - return: ["newest"]
+            - if:
+                condition: { and: [{ eq: [repo, "exodus"] }, { ge: [{ call: [<.pins.index_of, "${name}\t${version}"] }, 0] }] }
+                then:
+                  - return: ["dependency"]
+            - if:
+                condition: { ge: [{ call: [<.protected.index_of, "${repo}\t${name}\t${version}"] }, 0] }
+                then:
+                  - return: ["protected"]
+            - if:
+                condition: { lt: [rule, 0] }
+                then:
+                  - return: ["no_rule"]
+            - decl: [age_ms, i64, { -: [now_ms, { call: [<.o_ms.get, obj] }] }]
+            - if:
+                condition: { eq: [is_untagged, 1] }
+                then:
+                  - decl: [unt, i64, { call: [<.r_untagged.get, rule] }]
+                  - if:
+                      condition: { and: [{ ge: [unt, 0] }, { gt: [age_ms, { "*": [unt, <.day_ms] }] }] }
+                      then:
+                        - return: [""]
+                  - return: ["max_age"]
+            - decl: [keep, i64, { call: [<.r_keep.get, rule] }]
+            - decl: [age, i64, { call: [<.r_age.get, rule] }]
+            - if:
+                condition: { and: [{ lt: [keep, 0] }, { lt: [age, 0] }] }
+                then:
+                  - return: ["no_rule"]
+            - decl: [inside, i32, 0]
+            - if:
+                condition: { and: [{ ge: [keep, 0] }, { ge: [place, 0] }, { lt: [place, keep] }] }
+                then:
+                  - set: [inside, 1]
+            - decl: [old, i32, 0]
+            - if:
+                condition: { and: [{ ge: [age, 0] }, { gt: [age_ms, { "*": [age, <.day_ms] }] }] }
+                then:
+                  - set: [old, 1]
+            - if:
+                condition: { eq: [inside, 1] }
+                then:
+                  - return: ["keep_last"]
+            - if:
+                condition: { and: [{ ge: [age, 0] }, { eq: [old, 0] }] }
+                then:
+                  - return: ["max_age"]
+            - return: [""]
+
+      # {"delete":[{repo,name,version,bytes,rule}],"kept":[{repo,name,version,reason}],"bytes":N}
+      # in the order the objects were added (FW-44).
+      - def:
+          name: plan_json
+          args: [[now_ms, i64]]
+          return: string
+          body:
+            - decl: [dels, string, ""]
+            - decl: [kept, string, ""]
+            - decl: [total, i64, 0]
+            - decl: [obj, i32, 0]
+            - while:
+                condition: { lt: [obj, <.o_repo.len] }
+                body:
+                  - decl: [rule, i32, { call: [<.rule_for, obj] }]
+                  - decl: [reason, string, { call: [<.verdict, obj, rule, now_ms] }]
+                  - decl: [head, string, "{\"repo\":${{ call: [kontor.text.json_str, { call: [<.o_repo.get, obj] }] }},\"name\":${{ call: [kontor.text.json_str, { call: [<.o_name.get, obj] }] }},\"version\":${{ call: [kontor.text.json_str, { call: [<.o_version.get, obj] }] }}"]
+                  - if:
+                      condition: { eq: [reason.len, 0] }
+                      then:
+                        - decl: [bytes, i64, { call: [<.o_bytes.get, obj] }]
+                        - set: [total, { +: [total, bytes] }]
+                        - if: { condition: { gt: [dels.len, 0] }, then: [{ set: [dels, "${dels},"] }] }
+                        - set: [dels, "${dels}${head},\"bytes\":${bytes},\"rule\":${rule}}"]
+                      else:
+                        - if: { condition: { gt: [kept.len, 0] }, then: [{ set: [kept, "${kept},"] }] }
+                        - set: [kept, "${kept}${head},\"reason\":\"${reason}\"}"]
+                  - set: [obj, { +: [obj, 1] }]
+            - return: ["{\"delete\":[${dels}],\"kept\":[${kept}],\"bytes\":${total}}"]
+
+      # The stored rules as JSON (GET /api/v1/retention): unset limits are left out.
+      - def:
+          name: policy_json
+          return: string
+          body:
+            - decl: [out, string, ""]
+            - decl: [idx, i32, 0]
+            - while:
+                condition: { lt: [idx, <.r_repo.len] }
+                body:
+                  - decl: [rule, string, "{\"repo\":\"${{ call: [<.r_repo.get, idx] }}\",\"match\":${{ call: [kontor.text.json_str, { call: [<.r_match.get, idx] }] }}"]
+                  - decl: [keep, i64, { call: [<.r_keep.get, idx] }]
+                  - decl: [age, i64, { call: [<.r_age.get, idx] }]
+                  - decl: [unt, i64, { call: [<.r_untagged.get, idx] }]
+                  - if: { condition: { ge: [keep, 0] }, then: [{ set: [rule, "${rule},\"keep_last\":${keep}"] }] }
+                  - if: { condition: { ge: [age, 0] }, then: [{ set: [rule, "${rule},\"max_age_days\":${age}"] }] }
+                  - if: { condition: { ge: [unt, 0] }, then: [{ set: [rule, "${rule},\"untagged_after_days\":${unt}"] }] }
+                  - if: { condition: { gt: [out.len, 0] }, then: [{ set: [out, "${out},"] }] }
+                  - set: [out, "${out}${rule}}"]
+                  - set: [idx, { +: [idx, 1] }]
+            - return: ["{\"schedule\":${{ call: [kontor.text.json_str, <.schedule] }},\"rules\":[${out}]}"]
+
+      # Why an object must stay whatever the rules say (FW-42): "newest",
+      # "dependency", "protected" — or "" when nothing protects it, or
+      # "missing" when it is not among the objects added.
+      - def:
+          name: guard
+          args: [[repo, string], [name, string], [version, string]]
+          return: string
+          body:
+            - decl: [idx, i32, 0]
+            - while:
+                condition: { lt: [idx, <.o_repo.len] }
+                body:
+                  - decl: [orepo, string, { call: [<.o_repo.get, idx] }]
+                  - decl: [oname, string, { call: [<.o_name.get, idx] }]
+                  - decl: [over, string, { call: [<.o_version.get, idx] }]
+                  - if:
+                      condition: { and: [{ eq: [orepo, repo] }, { eq: [oname, name] }, { eq: [over, version] }] }
+                      then:
+                        - decl: [reason, string, { call: [<.verdict, idx, -1, 0] }]
+                        - if:
+                            condition: { eq: [reason, "no_rule"] }
+                            then:
+                              - return: [""]
+                        - return: [reason]
+                  - set: [idx, { +: [idx, 1] }]
+            - return: ["missing"]
+
+      # Objects the plan deletes, as "repo\tname\tversion\tbytes" lines.
+      - def:
+          name: plan_lines
+          args: [[now_ms, i64]]
+          return: list<string>
+          body:
+            - decl: [out, list<string>, []]
+            - decl: [idx, i32, 0]
+            - while:
+                condition: { lt: [idx, <.o_repo.len] }
+                body:
+                  - decl: [rule, i32, { call: [<.rule_for, idx] }]
+                  - decl: [reason, string, { call: [<.verdict, idx, rule, now_ms] }]
+                  - if:
+                      condition: { eq: [reason.len, 0] }
+                      then:
+                        - call: [out.push, "${{ call: [<.o_repo.get, idx] }}\t${{ call: [<.o_name.get, idx] }}\t${{ call: [<.o_version.get, idx] }}\t${{ call: [<.o_bytes.get, idx] }}"]
+                  - set: [idx, { +: [idx, 1] }]
+            - return: [out]

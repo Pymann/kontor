@@ -1,0 +1,178 @@
+# Expected exit code: 0
+# Retention selection (doc/spec/web_ui.md FW-41…FW-43, FW-100): versions,
+# dependencies and protections in, the delete and kept sets out.  Pure: no
+# data directory, no clock — `now` is passed in.
+- import: "../lib/retention.aiml"
+
+- decl: [DAY, i64, 86400000, { const: true }]
+- decl: [NOW, i64, 1764000000000, { const: true }]
+
+# Counts failed expectations; one instance per test run.
+- class:
+    name: Check
+    members:
+      - [fails, i32, 0, { access: public }]
+    methods:
+      - def:
+          name: contains
+          args: [[label, string], [haystack, string], [needle, string]]
+          body:
+            - if:
+                condition: { lt: [{ call: [haystack.index_of, needle] }, 0] }
+                then:
+                  - print: ["[FAIL] ${label}: missing ${needle}"]
+                  - print: ["       in ${haystack}"]
+                  - set: [<.fails, { +: [<.fails, 1] }]
+
+      - def:
+          name: missing
+          args: [[label, string], [haystack, string], [needle, string]]
+          body:
+            - if:
+                condition: { ge: [{ call: [haystack.index_of, needle] }, 0] }
+                then:
+                  - print: ["[FAIL] ${label}: unexpected ${needle}"]
+                  - print: ["       in ${haystack}"]
+                  - set: [<.fails, { +: [<.fails, 1] }]
+
+      # `needle` within the "delete" list of a plan (not in "kept").
+      - def:
+          name: deleted
+          args: [[label, string], [plan, string], [needle, string]]
+          body:
+            - decl: [cut, i32, { call: [plan.index_of, "],\"kept\":["] }]
+            - decl: [dels, string, { call: [plan.substr, 0, cut] }]
+            - call: [<.contains, label, dels, needle]
+
+      - def:
+          name: not_deleted
+          args: [[label, string], [plan, string], [needle, string]]
+          body:
+            - decl: [cut, i32, { call: [plan.index_of, "],\"kept\":["] }]
+            - decl: [dels, string, { call: [plan.substr, 0, cut] }]
+            - call: [<.missing, label, dels, needle]
+
+      - def:
+          name: equals
+          args: [[label, string], [got, string], [want, string]]
+          body:
+            - if:
+                condition: { neq: [got, want] }
+                then:
+                  - print: ["[FAIL] ${label}: got '${got}' want '${want}'"]
+                  - set: [<.fails, { +: [<.fails, 1] }]
+
+# `age_days` days before NOW.
+- def:
+    name: ago
+    args: [[age_days, i64]]
+    return: i64
+    body:
+      - return: [{ -: [NOW, { "*": [age_days, DAY] }] }]
+
+- def:
+    name: del_entry
+    args: [[repo, string], [name, string], [version, string]]
+    return: string
+    body:
+      - return: ["{\"repo\":\"${repo}\",\"name\":\"${name}\",\"version\":\"${version}\""]
+
+- def:
+    name: kept_entry
+    args: [[repo, string], [name, string], [version, string], [reason, string]]
+    return: string
+    body:
+      - return: ["{\"repo\":\"${repo}\",\"name\":\"${name}\",\"version\":\"${version}\",\"reason\":\"${reason}\"}"]
+
+- def:
+    name: main
+    return: i32
+    body:
+      - decl: [check, ptr<Check>, { new: Check }]
+
+      # ── policy validation (FW-40, FW-41) ────────────────────────────────
+      - decl: [bad, ptr<kontor.retention.Planner>, { new: kontor.retention.Planner }]
+      - call: [check.contains, "rule without limit", { call: [bad.set_policy, "rules:\n  - repo: exodus\n    match: \"*\"\n"] }, "rules[0]"]
+      - call: [check.contains, "unknown repo", { call: [bad.set_policy, "rules:\n  - repo: maven\n    match: \"*\"\n    keep_last: 1\n"] }, "rules[0].repo"]
+      - call: [check.contains, "negative keep_last", { call: [bad.set_policy, "rules:\n  - repo: exodus\n    match: \"*\"\n    keep_last: -1\n"] }, "rules[0].keep_last"]
+      - call: [check.contains, "bad schedule", { call: [bad.set_policy, "schedule: \"25:00\"\nrules: []\n"] }, "schedule"]
+      - call: [check.equals, "valid policy", { call: [bad.set_policy, "schedule: \"03:00\"\nrules:\n  - repo: exodus\n    match: \"*\"\n    keep_last: 2\n"] }, ""]
+      - call: [check.equals, "empty policy", { call: [bad.set_policy, ""] }, ""]
+
+      # ── no policy: nothing is deleted (opt-in) ──────────────────────────
+      - decl: [none, ptr<kontor.retention.Planner>, { new: kontor.retention.Planner }]
+      - call: [none.add, "exodus", "core", "1.0.0", { call: [ago, 900] }, 10]
+      - call: [none.add, "exodus", "core", "2.0.0", { call: [ago, 1] }, 10]
+      - decl: [none_plan, string, { call: [none.plan_json, NOW] }]
+      - call: [check.contains, "no policy deletes nothing", none_plan, "\"delete\":[]"]
+      - call: [check.contains, "no rule -> kept", none_plan, { call: [kept_entry, "exodus", "core", "1.0.0", "no_rule"] }]
+
+      # ── keep_last, max_age_days and the conjunction (FW-41, FW-43) ──────
+      - decl: [mixed, ptr<kontor.retention.Planner>, { new: kontor.retention.Planner }]
+      - decl: [perr, string, { call: [mixed.set_policy, "rules:\n  - repo: exodus\n    match: \"lib-*\"\n    keep_last: 2\n    max_age_days: 30\n  - repo: exodus\n    match: \"*\"\n    keep_last: 1\n  - repo: generic\n    match: \"ci-cache/**\"\n    max_age_days: 14\n"] }]
+      - call: [check.equals, "policy accepted", perr, ""]
+      # lib-a: 6 versions; 1.10.0 is newest (version order, not string order)
+      - call: [mixed.add, "exodus", "lib-a", "1.2.0", { call: [ago, 100] }, 100]
+      - call: [mixed.add, "exodus", "lib-a", "1.9.0", { call: [ago, 5] }, 100]
+      - call: [mixed.add, "exodus", "lib-a", "1.10.0", { call: [ago, 2] }, 100]
+      - call: [mixed.add, "exodus", "lib-a", "1.3.0", { call: [ago, 90] }, 100]
+      - call: [mixed.add, "exodus", "lib-a", "1.4.0", { call: [ago, 60] }, 100]
+      - call: [mixed.add, "exodus", "lib-a", "1.5.0", { call: [ago, 10] }, 100]
+      # app: second rule (keep_last 1), first matching rule decides
+      - call: [mixed.add, "exodus", "app", "1.0.0", { call: [ago, 3] }, 7]
+      - call: [mixed.add, "exodus", "app", "2.0.0", { call: [ago, 1] }, 7]
+      - call: [mixed.add, "exodus", "app", "3.0.0", { call: [ago, 0] }, 7]
+      # generic: by age only
+      - call: [mixed.add, "generic", "ci-cache/old.tar", "", { call: [ago, 20] }, 1000]
+      - call: [mixed.add, "generic", "ci-cache/new.tar", "", { call: [ago, 2] }, 1000]
+      - call: [mixed.add, "generic", "releases/x.tar", "", { call: [ago, 400] }, 1000]
+      # FW-42.2: app's newest manifest depends on lib-a 1.2.0 exactly
+      - call: [mixed.pin, "lib-a", "1.2.0"]
+      # FW-42.3: app 1.0.0 is protected
+      - call: [mixed.protect, "exodus", "app", "1.0.0"]
+      - decl: [plan, string, { call: [mixed.plan_json, NOW] }]
+
+      # lib-a: newest two by version are 1.10.0 and 1.9.0
+      - call: [check.contains, "newest kept", plan, { call: [kept_entry, "exodus", "lib-a", "1.10.0", "newest"] }]
+      - call: [check.contains, "keep_last kept", plan, { call: [kept_entry, "exodus", "lib-a", "1.9.0", "keep_last"] }]
+      - call: [check.contains, "outside N but young -> kept", plan, { call: [kept_entry, "exodus", "lib-a", "1.5.0", "max_age"] }]
+      - call: [check.deleted, "outside N and old -> deleted", plan, { call: [del_entry, "exodus", "lib-a", "1.3.0"] }]
+      - call: [check.deleted, "outside N and old -> deleted (2)", plan, { call: [del_entry, "exodus", "lib-a", "1.4.0"] }]
+      - call: [check.contains, "dependency kept", plan, { call: [kept_entry, "exodus", "lib-a", "1.2.0", "dependency"] }]
+      # app: keep_last 1 → 2.0.0 deleted, 1.0.0 protected
+      - call: [check.deleted, "second rule deletes", plan, { call: [del_entry, "exodus", "app", "2.0.0"] }]
+      - call: [check.contains, "protected kept", plan, { call: [kept_entry, "exodus", "app", "1.0.0", "protected"] }]
+      - call: [check.contains, "app newest", plan, { call: [kept_entry, "exodus", "app", "3.0.0", "newest"] }]
+      # generic
+      - call: [check.deleted, "old cache deleted", plan, { call: [del_entry, "generic", "ci-cache/old.tar", ""] }]
+      - call: [check.contains, "young cache kept", plan, { call: [kept_entry, "generic", "ci-cache/new.tar", "", "max_age"] }]
+      - call: [check.contains, "unmatched generic kept", plan, { call: [kept_entry, "generic", "releases/x.tar", "", "no_rule"] }]
+      # the rule index is reported; bytes add up: 100 + 100 + 7 + 1000
+      - call: [check.contains, "rule index", plan, "{\"repo\":\"exodus\",\"name\":\"app\",\"version\":\"2.0.0\",\"bytes\":7,\"rule\":1}"]
+      - call: [check.contains, "bytes", plan, "\"bytes\":1207}"]
+      - call: [check.not_deleted, "no newest in delete", plan, { call: [del_entry, "exodus", "lib-a", "1.10.0"] }]
+
+      # ── max_age_days alone, and the newest survives any age ─────────────
+      - decl: [age, ptr<kontor.retention.Planner>, { new: kontor.retention.Planner }]
+      - call: [age.set_policy, "rules:\n  - repo: exodus\n    match: \"*\"\n    max_age_days: 10\n"]
+      - call: [age.add, "exodus", "old", "0.1.0", { call: [ago, 500] }, 1]
+      - call: [age.add, "exodus", "old", "0.2.0", { call: [ago, 400] }, 1]
+      - decl: [age_plan, string, { call: [age.plan_json, NOW] }]
+      - call: [check.deleted, "age deletes", age_plan, { call: [del_entry, "exodus", "old", "0.1.0"] }]
+      - call: [check.contains, "old newest kept", age_plan, { call: [kept_entry, "exodus", "old", "0.2.0", "newest"] }]
+
+      # ── oci: keep_last over tags, untagged manifests by age ─────────────
+      - decl: [oci, ptr<kontor.retention.Planner>, { new: kontor.retention.Planner }]
+      - call: [oci.set_policy, "rules:\n  - repo: oci\n    match: \"cosmos-layers/*\"\n    keep_last: 1\n    untagged_after_days: 2\n"]
+      - call: [oci.add, "oci", "cosmos-layers/p1", "run-1", { call: [ago, 9] }, 50]
+      - call: [oci.add, "oci", "cosmos-layers/p1", "run-2", { call: [ago, 1] }, 50]
+      - call: [oci.add, "oci", "cosmos-layers/p1", "sha256:aa", { call: [ago, 3] }, 5]
+      - call: [oci.add, "oci", "cosmos-layers/p1", "sha256:bb", { call: [ago, 1] }, 5]
+      - decl: [oci_plan, string, { call: [oci.plan_json, NOW] }]
+      - call: [check.deleted, "old tag deleted", oci_plan, { call: [del_entry, "oci", "cosmos-layers/p1", "run-1"] }]
+      - call: [check.contains, "newest tag kept", oci_plan, { call: [kept_entry, "oci", "cosmos-layers/p1", "run-2", "newest"] }]
+      - call: [check.deleted, "old untagged deleted", oci_plan, { call: [del_entry, "oci", "cosmos-layers/p1", "sha256:aa"] }]
+      - call: [check.contains, "young untagged kept", oci_plan, { call: [kept_entry, "oci", "cosmos-layers/p1", "sha256:bb", "max_age"] }]
+
+      - print: ["retention tests failed: ${check.fails}"]
+      - return: [check.fails]

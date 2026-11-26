@@ -1,0 +1,19 @@
+# Entry point of kontor's web UI (doc/spec/web_ui.md §8).
+#
+#   ui/build.sh             wasm32 build into ui/dist/
+#   aiml ui/main.aiml       the same UI natively, against http://127.0.0.1:8081
+
+- import: "kontor_ui.aiml"
+
+- def:
+    name: main
+    return: i32
+    body:
+      - decl: [app, ptr<KontorUi>, { new: KontorUi }]
+      - decl: [given, string, { call: [sys.get_arg, 1] }]
+      - if:
+          condition: { eq: [{ call: [engine.is_web] }, 0] }
+          then:
+            - set: [app.api.base, "http://127.0.0.1:8081"]
+            - if: { condition: { and: [{ neq: [given, null] }, { gt: [given.len, 0] }] }, then: [{ set: [app.api.base, given] }] }
+      - return: [{ call: [app.view.run] }]

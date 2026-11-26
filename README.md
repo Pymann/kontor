@@ -66,7 +66,8 @@ KONTOR_TOKEN=… aiml venv /other/venv install kontor --kontor https://kontor.ex
 
 `publish` sends the committed, git-tracked sources as a reproducible archive;
 a version that kontor has is not replaced (`409`), so raise `version` in
-`aiml.tool.json` for the next one.  A private CA goes to the client as
+`aiml.tool.json` for the next one.  Only a caller with the `admin` right may
+overwrite a published version or write a deleted one again.  A private CA goes to the client as
 `AIML_WSS_CA=<ca.crt>`.
 
 ## API
@@ -82,6 +83,10 @@ exists under `/api/v1/…`; `/generic/…` and `/exodus/…` have `/api/v1/` ali
 | PUT/GET | `/generic/<path>` | write/read | Upload / download any file. Optional `X-Checksum-Sha256` header is verified on upload. Downloads support `Range`. Emits `artifact.published`. |
 | PUT/GET | `/exodus/<name>/<version>/exodus.json` | write/read | Project manifest. Name and version must match the URL. Emits `manifest.published`. Once the version's package is there, `409`. |
 | PUT/GET | `/exodus/<name>/<version>/package` | write/read | Build output (any bytes). Upload answers with the rebuild plan and emits `package.published`. A published version is not overwritten: a second upload is `409`. |
+| GET | `/generic/<dir>/` | read | Lists a directory (trailing slash), like `/api/v1/list/generic?prefix=<dir>`. A `404` on a download names the directory to list (`"list"`). |
+| GET | `/api/v1/list/generic` | read | Files below `prefix`: `recursive=1`, `match=<glob>` (`*`, `?`, `**`), `sort=path\|published`, `limit`/`offset`. See [Finding what is there](#finding-what-is-there). |
+| GET | `/api/v1/list/exodus` | read | Projects with newest version and version count. |
+| GET | `/api/v1/list/exodus/<name>` | read | Versions newest first, with publisher, time, sha256, size, `deleted`; `match`, `limit`/`offset`. |
 | GET | `/api/v1/graph` | read | All projects (newest version) with their dependency and apt edges. |
 | GET | `/api/v1/impact?project=<name>&version=<v>` | read | Rebuild plan for a new project version. |
 | GET | `/api/v1/impact?apt=<pkg>&version=<v>` | read | Rebuild plan for a system package version. |
@@ -100,6 +105,17 @@ exists under `/api/v1/…`; `/generic/…` and `/exodus/…` have `/api/v1/` ali
 | GET | `/api/v1/layers/<pipeline>` | read | Runs of a cosmos pipeline: tags of `cosmos-layers/<pipeline>`. |
 | GET | `/api/v1/layers/<pipeline>/<run>` | read | Stages of one run: name, bindings, reuse, step key, agent, digest, size, media type. |
 | * | `/v2/…` | read/write/delete | OCI Distribution v1.1 registry, see [Registry](#registry). |
+| GET | `/`, `/ui/…` | – | The web UI (`--ui-dir`, `$KONTOR_UI_DIR`), see [doc/spec/web_ui.md](doc/spec/web_ui.md). |
+| POST | `/api/v1/sessions` | Basic login | Session token for the UI `{id, owner, roles, token, expires_ms}` (`auth.session_hours`, default 12). |
+| GET | `/api/v1/catalog` | read | What kontor holds: projects, generic files, OCI repositories, layer runs. |
+| GET | `/api/v1/catalog/exodus/<name>` | read | Versions with publisher, time, size, protection, dependents, install command. |
+| GET | `/api/v1/catalog/generic?prefix=<p>` | read | Directory listing of generic files. |
+| GET/PUT | `/api/v1/retention` | admin | Retention policy (opt-in; `data/config/retention.yaml`). |
+| POST | `/api/v1/retention/preview` | admin | What the stored (or the posted) policy would delete. |
+| POST | `/api/v1/retention/run` | admin | Run it now; `GET /api/v1/retention/runs` is the log. |
+| GET/PUT/DELETE | `/api/v1/protected?repo=&name=&version=` | admin | Objects retention never deletes. |
+| DELETE | `/exodus/<name>/<version>` | delete | Delete a version (leaves a tombstone; newest, dependencies and protected ones are kept). |
+| GET/PUT | `/api/v1/settings` | admin | Anonymous role, public URL, session hours, custom roles; overrides `kontor.yaml`. |
 
 ### Auth
 
@@ -225,6 +241,35 @@ aiml venv /path/to/venv install --all --kontor http://localhost:8081   # the who
 Version specs: empty, `*` and `latest` float; anything else must match exactly.
 Dependents further down the chain are always rebuilt, because the versions
 their rebuilt dependencies will get are not known yet.
+
+## Finding what is there
+
+Nothing has to be guessed: every repository type has a listing
+([doc/spec/listing.md](doc/spec/listing.md)). Paths in a listing are full
+paths, so an item's `path` downloads as `/generic/<path>`.
+
+```sh
+# what is in a directory (files and subdirectories)
+curl -s "$KONTOR/api/v1/list/generic?prefix=aiml/ci"
+curl -s "$KONTOR/generic/aiml/ci/"                      # the same
+# every file of run 1234, whatever the commit
+curl -s "$KONTOR/api/v1/list/generic?prefix=aiml/ci&match=1234-*/**"
+# every build of commit abc123
+curl -s "$KONTOR/api/v1/list/generic?prefix=aiml/ci&match=*-abc123*/**"
+# the newest artifact below a prefix
+curl -s "$KONTOR/api/v1/list/generic?prefix=aiml/ci&recursive=1&sort=published&limit=1"
+# exodus projects and their versions (tombstones marked "deleted")
+curl -s "$KONTOR/api/v1/list/exodus"
+curl -s "$KONTOR/api/v1/list/exodus/aiml?match=1.0.*"
+# OCI: the registry's own listing, and cosmos runs
+curl -s "$KONTOR/v2/_catalog"; curl -s "$KONTOR/v2/<name>/tags/list"
+curl -s "$KONTOR/api/v1/layers/<pipeline>"
+```
+
+A generic listing answers
+`{"prefix","items":[{"path","bytes","sha256","published_ms","publisher"}],"dirs","total","offset","limit"}`;
+`limit` defaults to 1000 and is capped at 10000. A missing download answers
+`404` with `"list": "/api/v1/list/generic?prefix=<deepest existing directory>"`.
 
 ## Storage
 

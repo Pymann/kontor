@@ -1,0 +1,559 @@
+# kontor.catalog — the human-readable overview of what kontor holds
+# (doc/spec/web_ui.md §4, FW-30…FW-34).
+#
+# Publish metadata lives next to each object as meta.json
+# {"published_ms","publisher","tool"?}:
+#   exodus/<name>/<version>/meta.json
+#   generic/<path>/meta.json            (next to blob.sha256)
+# An object without one (stored before this chapter) gets one the first time
+# the catalog sees it: published_ms = then, publisher null.  aiml has no
+# file-mtime call, and "first seen" errs on the side of keeping (FW-43).
+
+- namespace: kontor.catalog
+
+- import: "text.aiml"
+- import: "store.aiml"
+- import: "graph.aiml"
+
+- model:
+    name: Meta
+    fields:
+      - [published_ms, i64, 0]
+      - [publisher, string, ""]
+      - [tool, i32, 0]
+
+# What a generic listing asks for (listing.md FL-02).
+- model:
+    name: ListQuery
+    fields:
+      - [prefix, string, ""]
+      - [match, string, ""]
+      - [recursive, i32, 0]
+      - [by_published, i32, 0]
+      - [limit, i32, 1000]
+      - [offset, i32, 0]
+
+- class:
+    name: Catalog
+    members:
+      - [data_dir, string, "./data", { access: public }]
+    methods:
+      # Writes meta.json for an object published now by `publisher`.
+      - def:
+          name: stamp
+          args: [[dir, string], [publisher, string], [tool, i32]]
+          body:
+            - decl: [now_ms, i64, { call: [time.now] }]
+            - decl: [who_json, string, "null"]
+            - if:
+                condition: { gt: [publisher.len, 0] }
+                then:
+                  - set: [who_json, { call: [kontor.text.json_str, publisher] }]
+            - decl: [tool_json, string, "false"]
+            - if: { condition: { eq: [tool, 1] }, then: [{ set: [tool_json, "true"] }] }
+            - call: [kontor.store.write_text, <.data_dir, dir, "meta.json", "{\"published_ms\":${now_ms},\"publisher\":${who_json},\"tool\":${tool_json}}"]
+
+      # meta.json of the object in `dir` (written now when it is missing).
+      - def:
+          name: meta
+          args: [[dir, string]]
+          return: kontor.catalog.Meta
+          body:
+            - decl: [out, kontor.catalog.Meta]
+            - decl: [mpath, string, "${dir}/meta.json"]
+            - if:
+                condition: { not: [{ call: [io.exists, mpath] }] }
+                then:
+                  - call: [<.stamp, dir, "", 0]
+            - decl: [doc, ptr<yaml_doc>, { call: [yaml.parse_file, mpath] }]
+            - decl: [root, ptr<yaml_node>, { call: [yaml.root, doc] }]
+            - decl: [ms_text, string, { call: [yaml.scalar, { call: [yaml.get, root, "published_ms"] }] }]
+            - decl: [who, string, { call: [yaml.scalar, { call: [yaml.get, root, "publisher"] }] }]
+            - decl: [tool_text, string, { call: [yaml.scalar, { call: [yaml.get, root, "tool"] }] }]
+            - call: [yaml.free, doc]
+            - if:
+                condition: { gt: [ms_text.len, 0] }
+                then:
+                  - decl: [published, i64, ms_text]
+                  - set: [out.published_ms, published]
+            - if:
+                condition: { neq: [who, "null"] }
+                then:
+                  - set: [out.publisher, who]
+            - if: { condition: { eq: [tool_text, "true"] }, then: [{ set: [out.tool, 1] }] }
+            - return: [out]
+
+      - def:
+          name: meta_json
+          args: [[found, kontor.catalog.Meta]]
+          return: string
+          body:
+            - decl: [who_json, string, "null"]
+            - if:
+                condition: { gt: [found.publisher.len, 0] }
+                then:
+                  - set: [who_json, { call: [kontor.text.json_str, found.publisher] }]
+            - return: ["\"published_ms\":${found.published_ms},\"publisher\":${who_json}"]
+
+      # Bytes of a stored blob (0 when missing).
+      - def:
+          name: blob_bytes
+          args: [[digest, string]]
+          return: i64
+          body:
+            - if:
+                condition: { eq: [digest.len, 0] }
+                then:
+                  - return: [0]
+            - decl: [bpath, string, { call: [kontor.store.blob_path, <.data_dir, digest] }]
+            - if:
+                condition: { not: [{ call: [io.exists, bpath] }] }
+                then:
+                  - return: [0]
+            - return: [{ call: [io.file_size, bpath] }]
+
+      # Live versions of a project (a manifest, no tombstone), newest first in
+      # version order.
+      - def:
+          name: versions
+          args: [[name, string]]
+          return: list<string>
+          body:
+            - return: [{ call: [<.versions_of, name, 0] }]
+
+      # Versions of a project, newest first; with_deleted = 1 also lists the
+      # tombstoned ones (listing.md FL-11).
+      - def:
+          name: versions_of
+          args: [[name, string], [with_deleted, i32]]
+          return: list<string>
+          body:
+            - decl: [base, string, "${<.data_dir}/exodus/${name}"]
+            - decl: [dirs, list<string>, { call: [kontor.store.list_subdirs, base] }]
+            - decl: [out, list<string>, []]
+            - decl: [idx, i32, 0]
+            - while:
+                condition: { lt: [idx, dirs.len] }
+                body:
+                  - decl: [cand, string, { call: [dirs.get, idx] }]
+                  - decl: [listed, i32, 0]
+                  - if: { condition: { call: [io.exists, "${base}/${cand}/exodus.json"] }, then: [{ set: [listed, 1] }] }
+                  - if:
+                      condition: { and: [{ eq: [with_deleted, 1] }, { call: [io.exists, "${base}/${cand}/tombstone.json"] }] }
+                      then:
+                        - set: [listed, 1]
+                  - if:
+                      condition: { eq: [listed, 1] }
+                      then:
+                        # insertion sort, newest first
+                        - decl: [pos, i32, 0]
+                        - decl: [placed, i32, 0]
+                        - while:
+                            condition: { and: [{ lt: [pos, out.len] }, { eq: [placed, 0] }] }
+                            body:
+                              - decl: [there, string, { call: [out.get, pos] }]
+                              - decl: [order, i32, { call: [kontor.text.version_cmp, cand, there] }]
+                              - if:
+                                  condition: { gt: [order, 0] }
+                                  then:
+                                    - set: [placed, 1]
+                                  else:
+                                    - set: [pos, { +: [pos, 1] }]
+                        - call: [out.insert, pos, cand]
+                  - set: [idx, { +: [idx, 1] }]
+            - return: [out]
+
+      # Projects whose newest manifest depends on `name` (sorted).
+      - def:
+          name: dependents
+          args: [[graph, ref<kontor.graph.DependencyGraph>], [name, string]]
+          return: list<string>
+          body:
+            - decl: [out, list<string>, []]
+            - decl: [idx, i32, 0]
+            - while:
+                condition: { lt: [idx, graph.names.len] }
+                body:
+                  - decl: [other, string, { call: [graph.names.get, idx] }]
+                  - decl: [lines, string, { call: [graph.deps.get, other] }]
+                  - decl: [needle, string, "${name}\t"]
+                  - decl: [hit, i32, 0]
+                  - if: { condition: { eq: [{ call: [lines.starts_with, needle] }, 1] }, then: [{ set: [hit, 1] }] }
+                  - if: { condition: { ge: [{ call: [lines.index_of, "\n${needle}"] }, 0] }, then: [{ set: [hit, 1] }] }
+                  - if: { condition: { eq: [hit, 1] }, then: [{ call: [out.push, other] }] }
+                  - set: [idx, { +: [idx, 1] }]
+            - call: [out.sort]
+            - return: [out]
+
+      # Every generic artifact path (the directories with a blob.sha256).
+      - def:
+          name: generic_paths
+          return: list<string>
+          body:
+            - decl: [base, string, "${<.data_dir}/generic"]
+            - decl: [found, list<string>, { call: [io.glob, "${base}/**/blob.sha256"] }]
+            - decl: [out, list<string>, []]
+            - decl: [cut, i32, { +: [base.len, 1] }]
+            - decl: [idx, i32, 0]
+            - while:
+                condition: { lt: [idx, found.len] }
+                body:
+                  - decl: [hit, string, { call: [found.get, idx] }]
+                  - decl: [rel_len, i32, { -: [hit.len, { +: [cut, 12] }] }]
+                  - if:
+                      condition: { gt: [rel_len, 0] }
+                      then:
+                        - call: [out.push, { call: [hit.substr, cut, rel_len] }]
+                  - set: [idx, { +: [idx, 1] }]
+            - return: [out]
+
+      # GET /api/v1/catalog (FW-30).
+      - def:
+          name: summary_json
+          args: [[graph, ref<kontor.graph.DependencyGraph>], [public_url, string]]
+          return: string
+          body:
+            - decl: [blobs, list<string>, { call: [io.glob, "${<.data_dir}/cas/*/*"] }]
+            - decl: [disk, i64, 0]
+            - decl: [bidx, i32, 0]
+            - while:
+                condition: { lt: [bidx, blobs.len] }
+                body:
+                  - set: [disk, { +: [disk, { call: [io.file_size, { call: [blobs.get, bidx] }] }] }]
+                  - set: [bidx, { +: [bidx, 1] }]
+            - decl: [projects, list<string>, { call: [kontor.store.list_subdirs, "${<.data_dir}/exodus"] }]
+            - decl: [projects_json, string, ""]
+            - decl: [pidx, i32, 0]
+            - while:
+                condition: { lt: [pidx, projects.len] }
+                body:
+                  - decl: [name, string, { call: [projects.get, pidx] }]
+                  - decl: [vers, list<string>, { call: [<.versions, name] }]
+                  - if:
+                      condition: { gt: [vers.len, 0] }
+                      then:
+                        - decl: [bytes, i64, 0]
+                        - decl: [updated, i64, 0]
+                        - decl: [vidx, i32, 0]
+                        - while:
+                            condition: { lt: [vidx, vers.len] }
+                            body:
+                              - decl: [vdir, string, "${<.data_dir}/exodus/${name}/${{ call: [vers.get, vidx] }}"]
+                              - set: [bytes, { +: [bytes, { call: [<.blob_bytes, { call: [kontor.store.read_text, "${vdir}/package.sha256"] }] }] }]
+                              - decl: [vmeta, kontor.catalog.Meta, { call: [<.meta, vdir] }]
+                              - if: { condition: { gt: [vmeta.published_ms, updated] }, then: [{ set: [updated, vmeta.published_ms] }] }
+                              - set: [vidx, { +: [vidx, 1] }]
+                        - decl: [newest, string, { call: [vers.get, 0] }]
+                        - decl: [nmeta, kontor.catalog.Meta, { call: [<.meta, "${<.data_dir}/exodus/${name}/${newest}"] }]
+                        - decl: [tool_json, string, "false"]
+                        - if: { condition: { eq: [nmeta.tool, 1] }, then: [{ set: [tool_json, "true"] }] }
+                        - if: { condition: { gt: [projects_json.len, 0] }, then: [{ set: [projects_json, "${projects_json},"] }] }
+                        - set: [projects_json, "${projects_json}{\"name\":${{ call: [kontor.text.json_str, name] }},\"newest\":${{ call: [kontor.text.json_str, newest] }},\"versions\":${vers.len},\"bytes\":${bytes},\"tool\":${tool_json},\"updated_ms\":${updated}}"]
+                  - set: [pidx, { +: [pidx, 1] }]
+            - decl: [gpaths, list<string>, { call: [<.generic_paths] }]
+            - decl: [gbytes, i64, 0]
+            - decl: [gidx, i32, 0]
+            - while:
+                condition: { lt: [gidx, gpaths.len] }
+                body:
+                  - decl: [gdir, string, "${<.data_dir}/generic/${{ call: [gpaths.get, gidx] }}"]
+                  - set: [gbytes, { +: [gbytes, { call: [<.blob_bytes, { call: [kontor.store.read_text, "${gdir}/blob.sha256"] }] }] }]
+                  - set: [gidx, { +: [gidx, 1] }]
+            # OCI repositories (oci/repos/<name with "/" → "+">/tags/<tag>);
+            # cosmos run layers are the repositories cosmos-layers/<pipeline>.
+            - decl: [repos, list<string>, { call: [kontor.store.list_subdirs, "${<.data_dir}/oci/repos"] }]
+            - decl: [oci, string, ""]
+            - decl: [layers, string, ""]
+            - decl: [ridx, i32, 0]
+            - while:
+                condition: { lt: [ridx, repos.len] }
+                body:
+                  - decl: [stored_name, string, { call: [repos.get, ridx] }]
+                  - decl: [repo, string, { call: [stored_name.replace, "+", "/"] }]
+                  - decl: [tags, list<string>, { call: [kontor.store.list_files, "${<.data_dir}/oci/repos/${stored_name}/tags"] }]
+                  - if: { condition: { gt: [oci.len, 0] }, then: [{ set: [oci, "${oci},"] }] }
+                  - set: [oci, "${oci}{\"repository\":${{ call: [kontor.text.json_str, repo] }},\"tags\":${tags.len}}"]
+                  - if:
+                      condition: { eq: [{ call: [repo.starts_with, "cosmos-layers/"] }, 1] }
+                      then:
+                        - if: { condition: { gt: [layers.len, 0] }, then: [{ set: [layers, "${layers},"] }] }
+                        - set: [layers, "${layers}{\"pipeline\":${{ call: [kontor.text.json_str, { call: [repo.substr, 14] }] }},\"runs\":${tags.len}}"]
+                  - set: [ridx, { +: [ridx, 1] }]
+            - return: ["{\"kontor\":{\"public_url\":${{ call: [kontor.text.json_str, public_url] }},\"disk_bytes\":${disk},\"blob_count\":${blobs.len}},\"exodus\":[${projects_json}],\"generic\":{\"files\":${gpaths.len},\"bytes\":${gbytes}},\"oci\":[${oci}],\"layers\":[${layers}]}"]
+
+      # GET /api/v1/catalog/exodus/<name> (FW-31); "" when the project has no
+      # live version.  `protected` lists "exodus\t<name>\t<version>" entries.
+      - def:
+          name: project_json
+          args: [[graph, ref<kontor.graph.DependencyGraph>], [name, string], [protected, list<string>], [public_url, string]]
+          return: string
+          body:
+            - decl: [vers, list<string>, { call: [<.versions, name] }]
+            - if:
+                condition: { eq: [vers.len, 0] }
+                then:
+                  - return: [""]
+            - decl: [out, string, ""]
+            - decl: [idx, i32, 0]
+            - while:
+                condition: { lt: [idx, vers.len] }
+                body:
+                  - decl: [version, string, { call: [vers.get, idx] }]
+                  - decl: [vdir, string, "${<.data_dir}/exodus/${name}/${version}"]
+                  - decl: [digest, string, { call: [kontor.store.read_text, "${vdir}/package.sha256"] }]
+                  - decl: [vmeta, kontor.catalog.Meta, { call: [<.meta, vdir] }]
+                  - decl: [prot, string, "false"]
+                  - if:
+                      condition: { ge: [{ call: [protected.index_of, "exodus\t${name}\t${version}"] }, 0] }
+                      then:
+                        - set: [prot, "true"]
+                  - decl: [doc, ptr<yaml_doc>, { call: [yaml.parse_file, "${vdir}/exodus.json"] }]
+                  - decl: [deps_json, string, { call: [kontor.graph.edges_json, { call: [kontor.graph.edge_lines, { call: [yaml.get, { call: [yaml.root, doc] }, "dependencies"] }] }] }]
+                  - call: [yaml.free, doc]
+                  - if: { condition: { gt: [out.len, 0] }, then: [{ set: [out, "${out},"] }] }
+                  - set: [out, "${out}{\"version\":${{ call: [kontor.text.json_str, version] }},${{ call: [<.meta_json, vmeta] }},\"sha256\":${{ call: [kontor.text.json_str, digest] }},\"bytes\":${{ call: [<.blob_bytes, digest] }},\"protected\":${prot},\"dependencies\":${deps_json}}"]
+                  - set: [idx, { +: [idx, 1] }]
+            - decl: [users, string, { call: [kontor.text.json_list, { call: [<.dependents, graph, name] }] }]
+            - decl: [newest, string, { call: [vers.get, 0] }]
+            - decl: [install, string, "aiml venv <dir> install ${name} --kontor ${public_url} --version ${newest}"]
+            - return: ["{\"name\":${{ call: [kontor.text.json_str, name] }},\"versions\":[${out}],\"dependents\":${users},\"install\":${{ call: [kontor.text.json_str, install] }}}"]
+
+      # GET /api/v1/catalog/generic?prefix=<p> (FW-32); `prefix` is safe.
+      - def:
+          name: generic_json
+          args: [[prefix, string]]
+          return: string
+          body:
+            - decl: [base, string, "${<.data_dir}/generic"]
+            - if: { condition: { gt: [prefix.len, 0] }, then: [{ set: [base, "${base}/${prefix}"] }] }
+            - decl: [subs, list<string>, { call: [kontor.store.list_subdirs, base] }]
+            - decl: [dirs, string, ""]
+            - decl: [files, string, ""]
+            - decl: [idx, i32, 0]
+            - while:
+                condition: { lt: [idx, subs.len] }
+                body:
+                  - decl: [entry, string, { call: [subs.get, idx] }]
+                  - decl: [edir, string, "${base}/${entry}"]
+                  - decl: [ename, string, { call: [kontor.text.json_str, entry] }]
+                  - if:
+                      condition: { call: [io.exists, "${edir}/blob.sha256"] }
+                      then:
+                        - decl: [digest, string, { call: [kontor.store.read_text, "${edir}/blob.sha256"] }]
+                        - decl: [fmeta, kontor.catalog.Meta, { call: [<.meta, edir] }]
+                        - if: { condition: { gt: [files.len, 0] }, then: [{ set: [files, "${files},"] }] }
+                        - set: [files, "${files}{\"name\":${ename},\"bytes\":${{ call: [<.blob_bytes, digest] }},\"sha256\":${{ call: [kontor.text.json_str, digest] }},${{ call: [<.meta_json, fmeta] }}}"]
+                  - decl: [inner, list<string>, { call: [kontor.store.list_subdirs, edir] }]
+                  - if:
+                      condition: { gt: [inner.len, 0] }
+                      then:
+                        - if: { condition: { gt: [dirs.len, 0] }, then: [{ set: [dirs, "${dirs},"] }] }
+                        - set: [dirs, "${dirs}${ename}"]
+                  - set: [idx, { +: [idx, 1] }]
+            - return: ["{\"prefix\":${{ call: [kontor.text.json_str, prefix] }},\"dirs\":[${dirs}],\"files\":[${files}]}"]
+
+      # ── listing (doc/spec/listing.md) ─────────────────────────────────────
+
+      # One listed generic file: {"path","bytes","sha256","published_ms","publisher"}.
+      - def:
+          name: generic_item_json
+          args: [[full_path, string]]
+          return: string
+          body:
+            - decl: [fdir, string, "${<.data_dir}/generic/${full_path}"]
+            - decl: [digest, string, { call: [kontor.store.read_text, "${fdir}/blob.sha256"] }]
+            - decl: [fmeta, kontor.catalog.Meta, { call: [<.meta, fdir] }]
+            - decl: [bytes, i64, { call: [<.blob_bytes, digest] }]
+            - return: ["{\"path\":${{ call: [kontor.text.json_str, full_path] }},\"bytes\":${bytes},\"sha256\":${{ call: [kontor.text.json_str, digest] }},\"published_ms\":${fmeta.published_ms},\"publisher\":${{ call: [kontor.text.json_str, fmeta.publisher] }}}"]
+
+      # Sort key "<15 digits of (max - published_ms)>|<path>": ascending
+      # order is newest first, ties by path (FL-02, FL-31).
+      - def:
+          name: published_key
+          args: [[full_path, string]]
+          return: string
+          body:
+            - decl: [fmeta, kontor.catalog.Meta, { call: [<.meta, "${<.data_dir}/generic/${full_path}"] }]
+            - decl: [inverse, i64, { -: [999999999999999, fmeta.published_ms] }]
+            - decl: [digits, string, "${inverse}"]
+            - while:
+                condition: { lt: [digits.len, 15] }
+                body:
+                  - set: [digits, "0${digits}"]
+            - return: ["${digits}|${full_path}"]
+
+      # GET /api/v1/list/generic (FL-01, FL-02).  The caller has validated
+      # the parameters and that `prefix` is a directory (or the root).
+      - def:
+          name: list_generic_json
+          args: [[ask, kontor.catalog.ListQuery]]
+          return: string
+          body:
+            - decl: [prefix, string, ask.prefix]
+            - decl: [match, string, ask.match]
+            - decl: [recursive, i32, ask.recursive]
+            - decl: [by_published, i32, ask.by_published]
+            - decl: [limit, i32, ask.limit]
+            - decl: [offset, i32, ask.offset]
+            - decl: [base, string, "${<.data_dir}/generic"]
+            - decl: [lead, string, ""]
+            - if:
+                condition: { gt: [prefix.len, 0] }
+                then:
+                  - set: [base, "${base}/${prefix}"]
+                  - set: [lead, "${prefix}/"]
+            - decl: [rels, list<string>, []]
+            - decl: [subdirs, list<string>, []]
+            - if:
+                condition: { eq: [recursive, 1] }
+                then:
+                  - decl: [found, list<string>, { call: [io.glob, "${base}/**/blob.sha256"] }]
+                  - decl: [cut, i32, { +: [base.len, 1] }]
+                  - decl: [fidx, i32, 0]
+                  - while:
+                      condition: { lt: [fidx, found.len] }
+                      body:
+                        - decl: [hit, string, { call: [found.get, fidx] }]
+                        - decl: [rel_len, i32, { -: [hit.len, { +: [cut, 12] }] }]
+                        - if:
+                            condition: { gt: [rel_len, 0] }
+                            then:
+                              - call: [rels.push, { call: [hit.substr, cut, rel_len] }]
+                        - set: [fidx, { +: [fidx, 1] }]
+                else:
+                  - decl: [subs, list<string>, { call: [kontor.store.list_subdirs, base] }]
+                  - decl: [sidx, i32, 0]
+                  - while:
+                      condition: { lt: [sidx, subs.len] }
+                      body:
+                        - decl: [entry, string, { call: [subs.get, sidx] }]
+                        - if:
+                            condition: { call: [io.exists, "${base}/${entry}/blob.sha256"] }
+                            then:
+                              - call: [rels.push, entry]
+                        - decl: [inner, list<string>, { call: [kontor.store.list_subdirs, "${base}/${entry}"] }]
+                        - if:
+                            condition: { gt: [inner.len, 0] }
+                            then:
+                              - call: [subdirs.push, entry]
+                        - set: [sidx, { +: [sidx, 1] }]
+            # match, then the full paths in their order
+            - decl: [keys, list<string>, []]
+            - decl: [ridx, i32, 0]
+            - while:
+                condition: { lt: [ridx, rels.len] }
+                body:
+                  - decl: [rel, string, { call: [rels.get, ridx] }]
+                  - decl: [keep, i32, 1]
+                  - if:
+                      condition: { gt: [match.len, 0] }
+                      then:
+                        - set: [keep, { call: [io.glob_match, match, rel] }]
+                  - if:
+                      condition: { eq: [keep, 1] }
+                      then:
+                        - decl: [full_path, string, "${lead}${rel}"]
+                        - if:
+                            condition: { eq: [by_published, 1] }
+                            then:
+                              - call: [keys.push, { call: [<.published_key, full_path] }]
+                            else:
+                              - call: [keys.push, full_path]
+                  - set: [ridx, { +: [ridx, 1] }]
+            - call: [keys.sort]
+            - decl: [items, string, ""]
+            - decl: [kidx, i32, offset]
+            - decl: [stop_at, i32, { +: [offset, limit] }]
+            - if: { condition: { gt: [stop_at, keys.len] }, then: [{ set: [stop_at, keys.len] }] }
+            - while:
+                condition: { lt: [kidx, stop_at] }
+                body:
+                  - decl: [key, string, { call: [keys.get, kidx] }]
+                  - decl: [item_path, string, key]
+                  - if:
+                      condition: { eq: [by_published, 1] }
+                      then:
+                        - set: [item_path, { call: [key.substr, 16] }]
+                  - if: { condition: { gt: [items.len, 0] }, then: [{ set: [items, "${items},"] }] }
+                  - set: [items, "${items}${{ call: [<.generic_item_json, item_path] }}"]
+                  - set: [kidx, { +: [kidx, 1] }]
+            - call: [subdirs.sort]
+            - decl: [dirs, string, ""]
+            - decl: [didx, i32, 0]
+            - while:
+                condition: { lt: [didx, subdirs.len] }
+                body:
+                  - if: { condition: { gt: [dirs.len, 0] }, then: [{ set: [dirs, "${dirs},"] }] }
+                  - decl: [dir_path, string, "${lead}${{ call: [subdirs.get, didx] }}"]
+                  - set: [dirs, "${dirs}${{ call: [kontor.text.json_str, dir_path] }}"]
+                  - set: [didx, { +: [didx, 1] }]
+            - return: ["{\"prefix\":${{ call: [kontor.text.json_str, prefix] }},\"items\":[${items}],\"dirs\":[${dirs}],\"total\":${keys.len},\"offset\":${offset},\"limit\":${limit}}"]
+
+      # GET /api/v1/list/exodus (FL-10).
+      - def:
+          name: list_exodus_json
+          return: string
+          body:
+            - decl: [projects, list<string>, { call: [kontor.store.list_subdirs, "${<.data_dir}/exodus"] }]
+            - call: [projects.sort]
+            - decl: [items, string, ""]
+            - decl: [pidx, i32, 0]
+            - while:
+                condition: { lt: [pidx, projects.len] }
+                body:
+                  - decl: [name, string, { call: [projects.get, pidx] }]
+                  - decl: [every, list<string>, { call: [<.versions_of, name, 1] }]
+                  - if:
+                      condition: { gt: [every.len, 0] }
+                      then:
+                        - decl: [live, list<string>, { call: [<.versions_of, name, 0] }]
+                        - decl: [newest, string, ""]
+                        - if: { condition: { gt: [live.len, 0] }, then: [{ set: [newest, { call: [live.get, 0] }] }] }
+                        - if: { condition: { gt: [items.len, 0] }, then: [{ set: [items, "${items},"] }] }
+                        - set: [items, "${items}{\"name\":${{ call: [kontor.text.json_str, name] }},\"newest\":${{ call: [kontor.text.json_str, newest] }},\"versions\":${every.len}}"]
+                  - set: [pidx, { +: [pidx, 1] }]
+            - return: ["{\"items\":[${items}]}"]
+
+      # GET /api/v1/list/exodus/<name> (FL-11); "" for an unknown project.
+      - def:
+          name: list_versions_json
+          args: [[name, string], [match, string], [limit, i32], [offset, i32]]
+          return: string
+          body:
+            - decl: [every, list<string>, { call: [<.versions_of, name, 1] }]
+            - if: { condition: { eq: [every.len, 0] }, then: [{ return: [""] }] }
+            - decl: [chosen, list<string>, []]
+            - decl: [vidx, i32, 0]
+            - while:
+                condition: { lt: [vidx, every.len] }
+                body:
+                  - decl: [version, string, { call: [every.get, vidx] }]
+                  - decl: [keep, i32, 1]
+                  - if:
+                      condition: { gt: [match.len, 0] }
+                      then:
+                        - set: [keep, { call: [io.glob_match, match, version] }]
+                  - if: { condition: { eq: [keep, 1] }, then: [{ call: [chosen.push, version] }] }
+                  - set: [vidx, { +: [vidx, 1] }]
+            - decl: [items, string, ""]
+            - decl: [cidx, i32, offset]
+            - decl: [stop_at, i32, { +: [offset, limit] }]
+            - if: { condition: { gt: [stop_at, chosen.len] }, then: [{ set: [stop_at, chosen.len] }] }
+            - while:
+                condition: { lt: [cidx, stop_at] }
+                body:
+                  - decl: [shown, string, { call: [chosen.get, cidx] }]
+                  - decl: [vdir, string, "${<.data_dir}/exodus/${name}/${shown}"]
+                  - decl: [deleted, string, "true"]
+                  - decl: [digest, string, ""]
+                  - if:
+                      condition: { call: [io.exists, "${vdir}/exodus.json"] }
+                      then:
+                        - set: [deleted, "false"]
+                        - set: [digest, { call: [kontor.store.read_text, "${vdir}/package.sha256"] }]
+                  - decl: [vmeta, kontor.catalog.Meta, { call: [<.meta, vdir] }]
+                  - decl: [bytes, i64, { call: [<.blob_bytes, digest] }]
+                  - if: { condition: { gt: [items.len, 0] }, then: [{ set: [items, "${items},"] }] }
+                  - set: [items, "${items}{\"version\":${{ call: [kontor.text.json_str, shown] }},\"published_ms\":${vmeta.published_ms},\"publisher\":${{ call: [kontor.text.json_str, vmeta.publisher] }},\"sha256\":${{ call: [kontor.text.json_str, digest] }},\"bytes\":${bytes},\"deleted\":${deleted}}"]
+                  - set: [cidx, { +: [cidx, 1] }]
+            - return: ["{\"name\":${{ call: [kontor.text.json_str, name] }},\"items\":[${items}],\"total\":${chosen.len},\"offset\":${offset},\"limit\":${limit}}"]

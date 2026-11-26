@@ -1,0 +1,99 @@
+# kontor.webui — the web UI's static files under /ui/ (doc/spec/web_ui.md §2,
+# FW-10…FW-15).  The files are whatever the UI build put into the UI
+# directory; they need no authorization and hold no data.
+
+- namespace: kontor.webui
+
+- import: "exchange.aiml"
+
+# Content type by file extension.
+- def:
+    name: content_type
+    static_off: ["str_cmp"]
+    args: [[file_path, string]]
+    return: string
+    body:
+      - decl: [types, map<string:string>, { "html": "text/html; charset=utf-8", "js": "text/javascript; charset=utf-8", "mjs": "text/javascript; charset=utf-8", "wasm": "application/wasm", "css": "text/css; charset=utf-8", "json": "application/json", "svg": "image/svg+xml", "png": "image/png", "ico": "image/x-icon", "ttf": "font/ttf", "woff2": "font/woff2", "data": "application/octet-stream", "txt": "text/plain; charset=utf-8" }]
+      - decl: [fpath, path, file_path]
+      - decl: [dotted, string, { call: [fpath.extension] }]
+      - if:
+          condition: { lt: [dotted.len, 2] }
+          then:
+            - return: ["application/octet-stream"]
+      - decl: [ext, string, { call: [dotted.substr, 1] }]
+      - if:
+          condition: { eq: [{ call: [types.contains, ext] }, 1] }
+          then:
+            - return: [{ call: [types.get, ext] }]
+      - return: ["application/octet-stream"]
+
+- class:
+    name: StaticUi
+    members:
+      # Resolved UI directory ("" = no UI installed).
+      - [root, string, "", { access: public }]
+      - [csp, string, "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; frame-ancestors 'none'", { const: true }]
+    methods:
+      # The first candidate directory that exists becomes the root.
+      - def:
+          name: setup
+          args: [[candidates, list<string>]]
+          body:
+            - decl: [idx, i32, 0]
+            - while:
+                condition: { lt: [idx, candidates.len] }
+                body:
+                  - decl: [cand, string, { call: [candidates.get, idx] }]
+                  - if:
+                      condition: { and: [{ gt: [cand.len, 0] }, { call: [io.is_dir, cand] }] }
+                      then:
+                        - set: [<.root, { call: [io.realpath, cand] }]
+                        - return: []
+                  - set: [idx, { +: [idx, 1] }]
+
+      - def:
+          name: installed
+          return: i32
+          body:
+            - if:
+                condition: { gt: [<.root.len, 0] }
+                then:
+                  - return: [1]
+            - return: [0]
+
+      # GET /ui/<rel>.  `rel` is the path below /ui/ ("" = index.html).
+      - def:
+          name: serve
+          args: [[xch, ref<kontor.http.Exchange>], [rel, string]]
+          body:
+            - if:
+                condition: { eq: [<.root.len, 0] }
+                then:
+                  - call: [xch.error, 404, "the web UI is not installed (--ui-dir)"]
+                  - return: []
+            - call: [xch.set_header, "content-security-policy", <.csp]
+            - call: [xch.set_header, "x-content-type-options", "nosniff"]
+            - call: [xch.set_header, "referrer-policy", "no-referrer"]
+            - decl: [want, string, rel]
+            - if:
+                condition: { or: [{ eq: [want.len, 0] }, { eq: [{ call: [want.ends_with, "/"] }, 1] }] }
+                then:
+                  - set: [want, "${want}index.html"]
+            # Everything resolved (symlinks, ..) must stay below the root.
+            - decl: [real, string, { call: [io.realpath, "${<.root}/${want}"] }]
+            - decl: [inside, i32, { call: [real.starts_with, "${<.root}/"] }]
+            - if:
+                condition: { or: [{ eq: [real.len, 0] }, { eq: [inside, 0] }, { not: [{ call: [io.is_file, real] }] }] }
+                then:
+                  - call: [xch.error, 404, "not found"]
+                  - return: []
+            - decl: [ctype, string, { call: [kontor.webui.content_type, real] }]
+            - if:
+                condition: { eq: [{ call: [real.ends_with, "/index.html"] }, 1] }
+                then:
+                  - call: [xch.set_header, "cache-control", "no-cache"]
+                  - call: [xch.file, real, ctype]
+                  - return: []
+            # ETag and If-None-Match → 304 come from the HTTP runtime's file
+            # sending (aiml spec/32_2).
+            - call: [xch.file, real, ctype]

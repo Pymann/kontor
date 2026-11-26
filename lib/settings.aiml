@@ -1,0 +1,371 @@
+# kontor.settings — runtime settings the UI changes (doc/spec/web_ui.md §6,
+# FW-60…FW-62).  Stored in <data>/config/settings.yaml (written as JSON);
+# a key set there overrides the same key of kontor.yaml, which stays the
+# operator's hand-written file.
+#
+#   {"public_url": "...", "anonymous": "<role>|none", "session_hours": N,
+#    "roles": {"<name>": ["read", ...]}}
+#
+# Roles here add to the built-ins and to kontor.yaml's `roles:`; a built-in
+# role cannot be redefined.
+
+- namespace: kontor.settings
+
+- import: "text.aiml"
+- import: "store.aiml"
+- import: "auth.aiml"
+
+- class:
+    name: Settings
+    members:
+      - [data_dir, string, "./data", { access: public }]
+      # "" = not set here
+      - [public_url, string, "", { access: public }]
+      - [anonymous, string, "", { access: public }]
+      - [session_hours, i32, 0, { access: public }]
+      # role → comma-separated actions, the roles defined here
+      - [roles, map<string:string>, null, { access: public }]
+      # what kontor.yaml itself says ("" = not there)
+      - [file_public_url, string, "", { access: public }]
+      - [file_anonymous, string, "", { access: public }]
+      - [file_session_hours, string, "", { access: public }]
+      - [file_roles, map<string:string>, null, { access: public }]
+    methods:
+      - def:
+          name: is_builtin
+          args: [[role, string]]
+          return: i32
+          body:
+            - decl: [names, list<string>, ["reader", "writer", "maintainer", "admin"]]
+            - if: { condition: { ge: [{ call: [names.index_of, role] }, 0] }, then: [{ return: [1] }] }
+            - return: [0]
+
+      - def:
+          name: is_action
+          args: [[act, string]]
+          return: i32
+          body:
+            - decl: [names, list<string>, ["read", "write", "delete", "admin", "webhook_admin", "*"]]
+            - if: { condition: { ge: [{ call: [names.index_of, act] }, 0] }, then: [{ return: [1] }] }
+            - return: [0]
+
+      - def:
+          name: settings_path
+          return: string
+          body:
+            - return: ["${<.data_dir}/config/settings.yaml"]
+
+      # Reads kontor.yaml (for the sources) and settings.yaml.
+      - def:
+          name: load
+          body:
+            - decl: [kpath, string, "${<.data_dir}/kontor.yaml"]
+            - if:
+                condition: { call: [io.exists, kpath] }
+                then:
+                  - decl: [kdoc, ptr<yaml_doc>, { call: [yaml.parse_file, kpath] }]
+                  - decl: [kroot, ptr<yaml_node>, { call: [yaml.root, kdoc] }]
+                  - set: [<.file_public_url, { call: [yaml.scalar, { call: [yaml.get, kroot, "public_url"] }] }]
+                  - decl: [kauth, ref<yaml_node>, { call: [yaml.get, kroot, "auth"] }]
+                  - set: [<.file_anonymous, { call: [yaml.scalar, { call: [yaml.get, kauth, "anonymous"] }] }]
+                  - set: [<.file_session_hours, { call: [yaml.scalar, { call: [yaml.get, kauth, "session_hours"] }] }]
+                  - decl: [kroles, ref<yaml_node>, { call: [yaml.get, kroot, "roles"] }]
+                  - decl: [kcount, i32, { call: [yaml.size, kroles] }]
+                  - decl: [kidx, i32, 0]
+                  - while:
+                      condition: { lt: [kidx, kcount] }
+                      body:
+                        - call: [<.file_roles.put, { call: [yaml.key, kroles, kidx] }, { call: [kontor.auth.seq_csv, { call: [yaml.value, kroles, kidx] }] }]
+                        - set: [kidx, { +: [kidx, 1] }]
+                  - call: [yaml.free, kdoc]
+            - decl: [spath, string, { call: [<.settings_path] }]
+            - if:
+                condition: { not: [{ call: [io.exists, spath] }] }
+                then:
+                  - return: []
+            - decl: [doc, ptr<yaml_doc>, { call: [yaml.parse_file, spath] }]
+            - decl: [root, ptr<yaml_node>, { call: [yaml.root, doc] }]
+            - set: [<.public_url, { call: [yaml.scalar, { call: [yaml.get, root, "public_url"] }] }]
+            - set: [<.anonymous, { call: [yaml.scalar, { call: [yaml.get, root, "anonymous"] }] }]
+            - decl: [hours_text, string, { call: [yaml.scalar, { call: [yaml.get, root, "session_hours"] }] }]
+            - if:
+                condition: { gt: [hours_text.len, 0] }
+                then:
+                  - decl: [hours, i32, hours_text]
+                  - set: [<.session_hours, hours]
+            - decl: [rnode, ref<yaml_node>, { call: [yaml.get, root, "roles"] }]
+            - decl: [rcount, i32, { call: [yaml.size, rnode] }]
+            - decl: [ridx, i32, 0]
+            - while:
+                condition: { lt: [ridx, rcount] }
+                body:
+                  - call: [<.roles.put, { call: [yaml.key, rnode, ridx] }, { call: [kontor.auth.seq_csv, { call: [yaml.value, rnode, ridx] }] }]
+                  - set: [ridx, { +: [ridx, 1] }]
+            - call: [yaml.free, doc]
+
+      # Puts the settings into effect on `acl` (FW-61).  `previous` are the
+      # roles this object had applied before (removed from acl when gone).
+      - def:
+          name: apply
+          args: [[acl, ref<kontor.auth.AccessControl>], [previous, list<string>]]
+          body:
+            - if: { condition: { gt: [<.anonymous.len, 0] }, then: [{ set: [acl.anonymous_role, <.anonymous] }] }
+            - if: { condition: { gt: [<.session_hours, 0] }, then: [{ set: [acl.session_hours, <.session_hours] }] }
+            - decl: [pidx, i32, 0]
+            - while:
+                condition: { lt: [pidx, previous.len] }
+                body:
+                  - decl: [gone, string, { call: [previous.get, pidx] }]
+                  - if:
+                      condition: { eq: [{ call: [<.roles.contains, gone] }, 0] }
+                      then:
+                        - if:
+                            condition: { eq: [{ call: [<.file_roles.contains, gone] }, 1] }
+                            then:
+                              - call: [acl.roles.put, gone, { call: [<.file_roles.get, gone] }]
+                            else:
+                              - if: { condition: { eq: [{ call: [acl.roles.contains, gone] }, 1] }, then: [{ call: [acl.roles.remove, gone] }] }
+                  - set: [pidx, { +: [pidx, 1] }]
+            - decl: [names, list<string>, { call: [<.roles.keys] }]
+            - decl: [idx, i32, 0]
+            - while:
+                condition: { lt: [idx, names.len] }
+                body:
+                  - decl: [rname, string, { call: [names.get, idx] }]
+                  - call: [acl.roles.put, rname, { call: [<.roles.get, rname] }]
+                  - set: [idx, { +: [idx, 1] }]
+
+      - def:
+          name: role_names
+          return: list<string>
+          body:
+            - return: [{ call: [<.roles.keys] }]
+
+      # Users and tokens that carry `role` ("" when none).
+      - def:
+          name: users_of
+          args: [[role, string]]
+          return: string
+          body:
+            - decl: [out, list<string>, []]
+            - decl: [dirs, list<string>, ["users", "tokens"]]
+            - decl: [didx, i32, 0]
+            - while:
+                condition: { lt: [didx, dirs.len] }
+                body:
+                  - decl: [dir, string, "${<.data_dir}/auth/${{ call: [dirs.get, didx] }}"]
+                  - decl: [files, list<string>, { call: [kontor.store.list_files, dir] }]
+                  - decl: [idx, i32, 0]
+                  - while:
+                      condition: { lt: [idx, files.len] }
+                      body:
+                        - decl: [doc, ptr<yaml_doc>, { call: [yaml.parse_file, "${dir}/${{ call: [files.get, idx] }}"] }]
+                        - decl: [root, ptr<yaml_node>, { call: [yaml.root, doc] }]
+                        - decl: [csv, string, { call: [kontor.auth.seq_csv, { call: [yaml.get, root, "roles"] }] }]
+                        - decl: [who, string, { call: [yaml.scalar, { call: [yaml.get, root, "name"] }] }]
+                        - if: { condition: { eq: [who.len, 0] }, then: [{ set: [who, { call: [yaml.scalar, { call: [yaml.get, root, "owner"] }] }] }] }
+                        - call: [yaml.free, doc]
+                        - decl: [held, list<string>, { call: [kontor.auth.csv_list, csv] }]
+                        - if:
+                            condition: { and: [{ ge: [{ call: [held.index_of, role] }, 0] }, { lt: [{ call: [out.index_of, who] }, 0] }] }
+                            then:
+                              - call: [out.push, who]
+                        - set: [idx, { +: [idx, 1] }]
+                  - set: [didx, { +: [didx, 1] }]
+            - call: [out.sort]
+            - decl: [text, string, ""]
+            - decl: [oidx, i32, 0]
+            - while:
+                condition: { lt: [oidx, out.len] }
+                body:
+                  - if: { condition: { gt: [text.len, 0] }, then: [{ set: [text, "${text}, "] }] }
+                  - set: [text, "${text}${{ call: [out.get, oidx] }}"]
+                  - set: [oidx, { +: [oidx, 1] }]
+            - return: [text]
+
+      # PUT /api/v1/settings: merges the given keys (FW-60, FW-62).  Returns
+      # "" or "<status> <message>" (400 invalid, 409 a role in use).
+      - def:
+          name: update
+          static_off: ["str_cmp"]
+          args: [[text, string], [acl, ref<kontor.auth.AccessControl>]]
+          return: string
+          body:
+            - decl: [doc, ptr<yaml_doc>, { call: [yaml.parse, text] }]
+            - decl: [perr, string, { call: [yaml.error, doc] }]
+            - if:
+                condition: { gt: [perr.len, 0] }
+                then:
+                  - return: ["400 not valid JSON: ${perr}"]
+            - decl: [root, ptr<yaml_node>, { call: [yaml.root, doc] }]
+            - decl: [new_url, string, { call: [yaml.scalar, { call: [yaml.get, root, "public_url"] }] }]
+            - decl: [new_anon, string, { call: [yaml.scalar, { call: [yaml.get, root, "anonymous"] }] }]
+            - decl: [hours_text, string, { call: [yaml.scalar, { call: [yaml.get, root, "session_hours"] }] }]
+            - decl: [rnode, ref<yaml_node>, { call: [yaml.get, root, "roles"] }]
+            - decl: [has_roles, i32, 0]
+            - if: { condition: { eq: [{ call: [yaml.kind, rnode] }, yaml.mapping] }, then: [{ set: [has_roles, 1] }] }
+            - decl: [new_roles, map<string:string>]
+            - decl: [rcount, i32, { call: [yaml.size, rnode] }]
+            - decl: [ridx, i32, 0]
+            - while:
+                condition: { and: [{ eq: [has_roles, 1] }, { lt: [ridx, rcount] }] }
+                body:
+                  - decl: [rname, string, { call: [yaml.key, rnode, ridx] }]
+                  - decl: [csv, string, { call: [kontor.auth.seq_csv, { call: [yaml.value, rnode, ridx] }] }]
+                  - if:
+                      condition: { eq: [{ call: [<.is_builtin, rname] }, 1] }
+                      then:
+                        - call: [yaml.free, doc]
+                        - return: ["400 '${rname}' is a built-in role and cannot be redefined"]
+                  - if:
+                      condition: { eq: [{ call: [kontor.auth.valid_name, rname] }, 0] }
+                      then:
+                        - call: [yaml.free, doc]
+                        - return: ["400 invalid role name '${rname}'"]
+                  - decl: [acts, list<string>, { call: [kontor.auth.csv_list, csv] }]
+                  - if:
+                      condition: { eq: [acts.len, 0] }
+                      then:
+                        - call: [yaml.free, doc]
+                        - return: ["400 role '${rname}' needs at least one action"]
+                  - decl: [aidx, i32, 0]
+                  - while:
+                      condition: { lt: [aidx, acts.len] }
+                      body:
+                        - decl: [act, string, { call: [acts.get, aidx] }]
+                        - if:
+                            condition: { eq: [{ call: [<.is_action, act] }, 0] }
+                            then:
+                              - call: [yaml.free, doc]
+                              - return: ["400 unknown action '${act}' in role '${rname}' (read, write, delete, admin, webhook_admin, *)"]
+                        - set: [aidx, { +: [aidx, 1] }]
+                  - call: [new_roles.put, rname, csv]
+                  - set: [ridx, { +: [ridx, 1] }]
+            - call: [yaml.free, doc]
+            - if:
+                condition: { and: [{ gt: [new_url.len, 0] }, { eq: [{ call: [new_url.starts_with, "http://"] }, 0] }, { eq: [{ call: [new_url.starts_with, "https://"] }, 0] }] }
+                then:
+                  - return: ["400 public_url must start with http:// or https://"]
+            - decl: [new_hours, i32, 0]
+            - if:
+                condition: { gt: [hours_text.len, 0] }
+                then:
+                  - set: [new_hours, hours_text]
+                  - if:
+                      condition: { or: [{ lt: [new_hours, 1] }, { gt: [new_hours, 8760] }] }
+                      then:
+                        - return: ["400 session_hours must be 1…8760"]
+            # Roles that go away must not be in use (FW-62).
+            - if:
+                condition: { eq: [has_roles, 1] }
+                then:
+                  - decl: [current, list<string>, { call: [<.roles.keys] }]
+                  - decl: [cidx, i32, 0]
+                  - while:
+                      condition: { lt: [cidx, current.len] }
+                      body:
+                        - decl: [old_role, string, { call: [current.get, cidx] }]
+                        - if:
+                            condition: { and: [{ eq: [{ call: [new_roles.contains, old_role] }, 0] }, { eq: [{ call: [<.file_roles.contains, old_role] }, 0] }] }
+                            then:
+                              - decl: [holders, string, { call: [<.users_of, old_role] }]
+                              - if:
+                                  condition: { gt: [holders.len, 0] }
+                                  then:
+                                    - return: ["409 role '${old_role}' is in use by ${holders}"]
+                        - set: [cidx, { +: [cidx, 1] }]
+            # The anonymous role must exist (after the role change).
+            - if:
+                condition: { and: [{ gt: [new_anon.len, 0] }, { neq: [new_anon, "none"] }] }
+                then:
+                  - decl: [known, i32, 0]
+                  - if: { condition: { eq: [{ call: [<.is_builtin, new_anon] }, 1] }, then: [{ set: [known, 1] }] }
+                  - if: { condition: { eq: [{ call: [new_roles.contains, new_anon] }, 1] }, then: [{ set: [known, 1] }] }
+                  - if: { condition: { eq: [{ call: [<.file_roles.contains, new_anon] }, 1] }, then: [{ set: [known, 1] }] }
+                  - if: { condition: { and: [{ eq: [has_roles, 0] }, { eq: [{ call: [<.roles.contains, new_anon] }, 1] }] }, then: [{ set: [known, 1] }] }
+                  - if:
+                      condition: { eq: [known, 0] }
+                      then:
+                        - return: ["400 anonymous must be 'none' or an existing role"]
+            - decl: [before, list<string>, { call: [<.roles.keys] }]
+            - if: { condition: { gt: [new_url.len, 0] }, then: [{ set: [<.public_url, new_url] }] }
+            - if: { condition: { gt: [new_anon.len, 0] }, then: [{ set: [<.anonymous, new_anon] }] }
+            - if: { condition: { gt: [new_hours, 0] }, then: [{ set: [<.session_hours, new_hours] }] }
+            - if:
+                condition: { eq: [has_roles, 1] }
+                then:
+                  - decl: [bidx, i32, 0]
+                  - while:
+                      condition: { lt: [bidx, before.len] }
+                      body:
+                        - call: [<.roles.remove, { call: [before.get, bidx] }]
+                        - set: [bidx, { +: [bidx, 1] }]
+                  - decl: [nnames, list<string>, { call: [new_roles.keys] }]
+                  - decl: [nidx, i32, 0]
+                  - while:
+                      condition: { lt: [nidx, nnames.len] }
+                      body:
+                        - decl: [nname, string, { call: [nnames.get, nidx] }]
+                        - call: [<.roles.put, nname, { call: [new_roles.get, nname] }]
+                        - set: [nidx, { +: [nidx, 1] }]
+            - call: [<.save]
+            - call: [<.apply, acl, before]
+            - return: [""]
+
+      - def:
+          name: roles_json
+          args: [[source, map<string:string>]]
+          return: string
+          body:
+            - decl: [names, list<string>, { call: [source.keys] }]
+            - decl: [out, string, ""]
+            - decl: [idx, i32, 0]
+            - while:
+                condition: { lt: [idx, names.len] }
+                body:
+                  - decl: [rname, string, { call: [names.get, idx] }]
+                  - if: { condition: { gt: [out.len, 0] }, then: [{ set: [out, "${out},"] }] }
+                  - set: [out, "${out}${{ call: [kontor.text.json_str, rname] }}:${{ call: [kontor.auth.csv_json, { call: [source.get, rname] }] }}"]
+                  - set: [idx, { +: [idx, 1] }]
+            - return: ["{${out}}"]
+
+      - def:
+          name: save
+          body:
+            - decl: [parts, string, ""]
+            - if: { condition: { gt: [<.public_url.len, 0] }, then: [{ set: [parts, "${parts}\"public_url\":${{ call: [kontor.text.json_str, <.public_url] }},"] }] }
+            - if: { condition: { gt: [<.anonymous.len, 0] }, then: [{ set: [parts, "${parts}\"anonymous\":${{ call: [kontor.text.json_str, <.anonymous] }},"] }] }
+            - if: { condition: { gt: [<.session_hours, 0] }, then: [{ set: [parts, "${parts}\"session_hours\":${<.session_hours},"] }] }
+            - decl: [mine, map<string:string>, <.roles]
+            - set: [parts, "${parts}\"roles\":${{ call: [<.roles_json, mine] }}"]
+            - call: [kontor.store.write_text, <.data_dir, "${<.data_dir}/config", "settings.yaml", "{${parts}}\n"]
+
+      # GET /api/v1/settings (FW-60): effective values and where each comes from.
+      - def:
+          name: view_json
+          args: [[acl, ref<kontor.auth.AccessControl>], [effective_url, string]]
+          return: string
+          body:
+            - decl: [src_url, string, "default"]
+            - if: { condition: { gt: [<.file_public_url.len, 0] }, then: [{ set: [src_url, "kontor.yaml"] }] }
+            - if: { condition: { gt: [<.public_url.len, 0] }, then: [{ set: [src_url, "settings"] }] }
+            - decl: [src_anon, string, "default"]
+            - if: { condition: { gt: [<.file_anonymous.len, 0] }, then: [{ set: [src_anon, "kontor.yaml"] }] }
+            - if: { condition: { gt: [<.anonymous.len, 0] }, then: [{ set: [src_anon, "settings"] }] }
+            - decl: [src_hours, string, "default"]
+            - if: { condition: { gt: [<.file_session_hours.len, 0] }, then: [{ set: [src_hours, "kontor.yaml"] }] }
+            - if: { condition: { gt: [<.session_hours, 0] }, then: [{ set: [src_hours, "settings"] }] }
+            # every non-built-in role in effect
+            - decl: [custom, map<string:string>]
+            - decl: [names, list<string>, { call: [acl.roles.keys] }]
+            - decl: [idx, i32, 0]
+            - while:
+                condition: { lt: [idx, names.len] }
+                body:
+                  - decl: [rname, string, { call: [names.get, idx] }]
+                  - if:
+                      condition: { eq: [{ call: [<.is_builtin, rname] }, 0] }
+                      then:
+                        - call: [custom.put, rname, { call: [acl.roles.get, rname] }]
+                  - set: [idx, { +: [idx, 1] }]
+            - return: ["{\"public_url\":${{ call: [kontor.text.json_str, effective_url] }},\"anonymous\":${{ call: [kontor.text.json_str, acl.anonymous_role] }},\"session_hours\":${acl.session_hours},\"roles\":${{ call: [<.roles_json, custom] }},\"source\":{\"public_url\":\"${src_url}\",\"anonymous\":\"${src_anon}\",\"session_hours\":\"${src_hours}\"}}"]

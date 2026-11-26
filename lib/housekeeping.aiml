@@ -1,0 +1,478 @@
+# kontor.housekeeping — retention runs, protection, deletion and the CAS
+# sweep (doc/spec/web_ui.md §5, FW-40…FW-50, FW-26).
+#
+# Files below the data directory:
+#   config/retention.yaml           the stored policy (FW-40)
+#   config/protected.txt            "repo\tname\tversion" per line (FW-42.3)
+#   retention/runs/<id>.json        one per run, the newest 50 are kept (FW-49)
+#   retention/sweep.txt             "digest\tfirst_seen_ms": unreferenced blobs
+#                                   and when a sweep first saw them (FW-46)
+#
+# aiml has no file-mtime call, so a blob's 24-hour grace is counted from the
+# first sweep that found it unreferenced.
+#
+# OCI tags are not yet planned or deleted (FW-34 OCI metadata is a later
+# step); their blobs are always marked as referenced.
+
+- namespace: kontor.housekeeping
+
+- import: "text.aiml"
+- import: "store.aiml"
+- import: "graph.aiml"
+- import: "catalog.aiml"
+- import: "retention.aiml"
+
+- class:
+    name: Housekeeping
+    members:
+      - [data_dir, string, "./data", { access: public }]
+      - [grace_ms, i64, 86400000, { const: true }]
+      - [keep_runs, i32, 50, { const: true }]
+      # "YYYY-MM-DD" of the last scheduled run ("" = none yet)
+      - [last_scheduled_day, string, "", { access: public }]
+    methods:
+      - def:
+          name: policy_path
+          return: string
+          body:
+            - return: ["${<.data_dir}/config/retention.yaml"]
+
+      - def:
+          name: policy_text
+          return: string
+          body:
+            - decl: [ppath, string, { call: [<.policy_path] }]
+            - if:
+                condition: { not: [{ call: [io.exists, ppath] }] }
+                then:
+                  - return: [""]
+            - return: [{ call: [io.read_file, ppath] }]
+
+      # Validates and stores a policy (FW-40).  "" or the error.
+      - def:
+          name: save_policy
+          args: [[text, string]]
+          return: string
+          body:
+            - decl: [probe, ptr<kontor.retention.Planner>, { new: kontor.retention.Planner }]
+            - decl: [problem, string, { call: [probe.set_policy, text] }]
+            - if:
+                condition: { gt: [problem.len, 0] }
+                then:
+                  - return: [problem]
+            - call: [kontor.store.write_text, <.data_dir, "${<.data_dir}/config", "retention.yaml", text]
+            - return: [""]
+
+      - def:
+          name: policy_json
+          return: string
+          body:
+            - decl: [planner, ptr<kontor.retention.Planner>, { new: kontor.retention.Planner }]
+            - call: [planner.set_policy, { call: [<.policy_text] }]
+            - return: [{ call: [planner.policy_json] }]
+
+      # ── protection ───────────────────────────────────────────────────────
+      - def:
+          name: protected
+          return: list<string>
+          body:
+            - decl: [out, list<string>, []]
+            - decl: [raw, string, { call: [kontor.store.read_text, "${<.data_dir}/config/protected.txt"] }]
+            - if:
+                condition: { eq: [raw.len, 0] }
+                then:
+                  - return: [out]
+            - decl: [lines, list<string>, { call: [raw.split, "\n"] }]
+            - decl: [idx, i32, 0]
+            - while:
+                condition: { lt: [idx, lines.len] }
+                body:
+                  - decl: [line, string, { call: [lines.get, idx] }]
+                  - if: { condition: { gt: [line.len, 0] }, then: [{ call: [out.push, line] }] }
+                  - set: [idx, { +: [idx, 1] }]
+            - return: [out]
+
+      - def:
+          name: store_protected
+          args: [[entries, list<string>]]
+          body:
+            - decl: [text, string, ""]
+            - decl: [idx, i32, 0]
+            - while:
+                condition: { lt: [idx, entries.len] }
+                body:
+                  - set: [text, "${text}${{ call: [entries.get, idx] }}\n"]
+                  - set: [idx, { +: [idx, 1] }]
+            - call: [kontor.store.write_text, <.data_dir, "${<.data_dir}/config", "protected.txt", text]
+
+      - def:
+          name: set_protected
+          args: [[entry, string], [wanted, i32]]
+          body:
+            - decl: [entries, list<string>, { call: [<.protected] }]
+            - decl: [position, i32, { call: [entries.index_of, entry] }]
+            - if:
+                condition: { and: [{ eq: [wanted, 1] }, { lt: [position, 0] }] }
+                then:
+                  - call: [entries.push, entry]
+                  - call: [entries.sort]
+                  - call: [<.store_protected, entries]
+            - if:
+                condition: { and: [{ eq: [wanted, 0] }, { ge: [position, 0] }] }
+                then:
+                  - call: [entries.remove_value, entry]
+                  - call: [<.store_protected, entries]
+
+      - def:
+          name: protected_json
+          return: string
+          body:
+            - decl: [entries, list<string>, { call: [<.protected] }]
+            - decl: [out, string, ""]
+            - decl: [idx, i32, 0]
+            - while:
+                condition: { lt: [idx, entries.len] }
+                body:
+                  - decl: [line, string, { call: [entries.get, idx] }]
+                  - decl: [fields, list<string>, { call: [line.split, "\t"] }]
+                  - decl: [prepo, string, { call: [fields.get, 0] }]
+                  - decl: [pname, string, ""]
+                  - decl: [pver, string, ""]
+                  - if: { condition: { gt: [fields.len, 1] }, then: [{ set: [pname, { call: [fields.get, 1] }] }] }
+                  - if: { condition: { gt: [fields.len, 2] }, then: [{ set: [pver, { call: [fields.get, 2] }] }] }
+                  - if: { condition: { gt: [out.len, 0] }, then: [{ set: [out, "${out},"] }] }
+                  - set: [out, "${out}{\"repo\":${{ call: [kontor.text.json_str, prepo] }},\"name\":${{ call: [kontor.text.json_str, pname] }},\"version\":${{ call: [kontor.text.json_str, pver] }}}"]
+                  - set: [idx, { +: [idx, 1] }]
+            - return: ["{\"protected\":[${out}]}"]
+
+      # ── planning ─────────────────────────────────────────────────────────
+      # A planner over everything stored, with `policy_text` as its policy.
+      # Returns the policy error in `problem` (planner is still usable).
+      - def:
+          name: planner_for
+          args: [[policy_text, string], [graph, ref<kontor.graph.DependencyGraph>], [catalog, ref<kontor.catalog.Catalog>]]
+          return: ptr<kontor.retention.Planner>
+          body:
+            - decl: [planner, ptr<kontor.retention.Planner>, { new: kontor.retention.Planner }]
+            - call: [planner.set_policy, policy_text]
+            - decl: [projects, list<string>, { call: [kontor.store.list_subdirs, "${<.data_dir}/exodus"] }]
+            - decl: [pidx, i32, 0]
+            - while:
+                condition: { lt: [pidx, projects.len] }
+                body:
+                  - decl: [name, string, { call: [projects.get, pidx] }]
+                  - decl: [vers, list<string>, { call: [catalog.versions, name] }]
+                  - decl: [vidx, i32, 0]
+                  - while:
+                      condition: { lt: [vidx, vers.len] }
+                      body:
+                        - decl: [version, string, { call: [vers.get, vidx] }]
+                        - decl: [vdir, string, "${<.data_dir}/exodus/${name}/${version}"]
+                        - decl: [vmeta, kontor.catalog.Meta, { call: [catalog.meta, vdir] }]
+                        - decl: [bytes, i64, { call: [catalog.blob_bytes, { call: [kontor.store.read_text, "${vdir}/package.sha256"] }] }]
+                        - call: [planner.add, "exodus", name, version, vmeta.published_ms, bytes]
+                        - set: [vidx, { +: [vidx, 1] }]
+                  - set: [pidx, { +: [pidx, 1] }]
+            - decl: [gpaths, list<string>, { call: [catalog.generic_paths] }]
+            - decl: [gidx, i32, 0]
+            - while:
+                condition: { lt: [gidx, gpaths.len] }
+                body:
+                  - decl: [rel, string, { call: [gpaths.get, gidx] }]
+                  - decl: [gdir, string, "${<.data_dir}/generic/${rel}"]
+                  - decl: [gmeta, kontor.catalog.Meta, { call: [catalog.meta, gdir] }]
+                  - decl: [gbytes, i64, { call: [catalog.blob_bytes, { call: [kontor.store.read_text, "${gdir}/blob.sha256"] }] }]
+                  - call: [planner.add, "generic", rel, "", gmeta.published_ms, gbytes]
+                  - set: [gidx, { +: [gidx, 1] }]
+            # Exact-version dependencies of every newest manifest (FW-42.2).
+            - decl: [nidx, i32, 0]
+            - while:
+                condition: { lt: [nidx, graph.names.len] }
+                body:
+                  - decl: [lines, string, { call: [graph.deps.get, { call: [graph.names.get, nidx] }] }]
+                  - decl: [edges, list<string>, { call: [lines.split, "\n"] }]
+                  - decl: [eidx, i32, 0]
+                  - while:
+                      condition: { lt: [eidx, edges.len] }
+                      body:
+                        - decl: [edge, string, { call: [edges.get, eidx] }]
+                        - decl: [tab, i32, { call: [edge.index_of, "\t"] }]
+                        - if:
+                            condition: { gt: [tab, 0] }
+                            then:
+                              - call: [planner.pin, { call: [edge.substr, 0, tab] }, { call: [edge.substr, { +: [tab, 1] }] }]
+                        - set: [eidx, { +: [eidx, 1] }]
+                  - set: [nidx, { +: [nidx, 1] }]
+            - decl: [prot, list<string>, { call: [<.protected] }]
+            - decl: [ridx, i32, 0]
+            - while:
+                condition: { lt: [ridx, prot.len] }
+                body:
+                  - decl: [line, string, { call: [prot.get, ridx] }]
+                  - decl: [pfields, list<string>, { call: [line.split, "\t"] }]
+                  - decl: [pver, string, ""]
+                  - if: { condition: { gt: [pfields.len, 2] }, then: [{ set: [pver, { call: [pfields.get, 2] }] }] }
+                  - if:
+                      condition: { gt: [pfields.len, 1] }
+                      then:
+                        - call: [planner.protect, { call: [pfields.get, 0] }, { call: [pfields.get, 1] }, pver]
+                  - set: [ridx, { +: [ridx, 1] }]
+            - return: [planner]
+
+      # ── deleting ─────────────────────────────────────────────────────────
+      # An exodus version becomes a tombstone (FW-47).
+      - def:
+          name: bury
+          args: [[name, string], [version, string], [actor, string], [reason, string]]
+          body:
+            - decl: [vdir, string, "${<.data_dir}/exodus/${name}/${version}"]
+            - call: [io.remove, "${vdir}/exodus.json"]
+            - call: [io.remove, "${vdir}/package.sha256"]
+            - call: [io.remove, "${vdir}/meta.json"]
+            - decl: [now_ms, i64, { call: [time.now] }]
+            - call: [kontor.store.write_text, <.data_dir, vdir, "tombstone.json", "{\"deleted_ms\":${now_ms},\"by\":${{ call: [kontor.text.json_str, actor] }},\"reason\":${{ call: [kontor.text.json_str, reason] }}}"]
+
+      # A generic artifact goes away; its path may be written again.
+      - def:
+          name: drop_generic
+          args: [[rel, string]]
+          body:
+            - decl: [gdir, string, "${<.data_dir}/generic/${rel}"]
+            - call: [io.remove, "${gdir}/blob.sha256"]
+            - call: [io.remove, "${gdir}/meta.json"]
+            - decl: [inner, list<string>, { call: [kontor.store.list_subdirs, gdir] }]
+            - if: { condition: { eq: [inner.len, 0] }, then: [{ call: [io.remove_all, gdir] }] }
+
+      - def:
+          name: tombstoned
+          args: [[name, string], [version, string]]
+          return: i32
+          body:
+            - if:
+                condition: { call: [io.exists, "${<.data_dir}/exodus/${name}/${version}/tombstone.json"] }
+                then:
+                  - return: [1]
+            - return: [0]
+
+      # ── CAS sweep (FW-46) ────────────────────────────────────────────────
+      # Every digest something refers to: exodus packages, generic files,
+      # OCI tags, OCI manifests and every sha256 their bytes mention.
+      - def:
+          name: referenced
+          return: map<string:i32>
+          body:
+            - decl: [refs, map<string:i32>]
+            - decl: [found, list<string>, { call: [io.glob, "${<.data_dir}/exodus/*/*/package.sha256"] }]
+            - decl: [more, list<string>, { call: [io.glob, "${<.data_dir}/generic/**/blob.sha256"] }]
+            - decl: [midx, i32, 0]
+            - while:
+                condition: { lt: [midx, more.len] }
+                body:
+                  - call: [found.push, { call: [more.get, midx] }]
+                  - set: [midx, { +: [midx, 1] }]
+            - decl: [idx, i32, 0]
+            - while:
+                condition: { lt: [idx, found.len] }
+                body:
+                  - call: [refs.put, { call: [kontor.store.read_text, { call: [found.get, idx] }] }, 1]
+                  - set: [idx, { +: [idx, 1] }]
+            # OCI: tag files hold "sha256:<hex>", manifests/<hex> are names.
+            - decl: [manifests, list<string>, []]
+            - decl: [tags, list<string>, { call: [io.glob, "${<.data_dir}/oci/repos/*/tags/*"] }]
+            - set: [idx, 0]
+            - while:
+                condition: { lt: [idx, tags.len] }
+                body:
+                  - decl: [tagged, string, { call: [kontor.store.read_text, { call: [tags.get, idx] }] }]
+                  - if:
+                      condition: { eq: [{ call: [tagged.starts_with, "sha256:"] }, 1] }
+                      then:
+                        - call: [manifests.push, { call: [tagged.substr, 7] }]
+                  - set: [idx, { +: [idx, 1] }]
+            - decl: [members, list<string>, { call: [io.glob, "${<.data_dir}/oci/repos/*/manifests/*"] }]
+            - set: [idx, 0]
+            - while:
+                condition: { lt: [idx, members.len] }
+                body:
+                  - decl: [mpath, path, { call: [members.get, idx] }]
+                  - call: [manifests.push, { call: [mpath.name] }]
+                  - set: [idx, { +: [idx, 1] }]
+            - set: [idx, 0]
+            - while:
+                condition: { lt: [idx, manifests.len] }
+                body:
+                  - decl: [digest, string, { call: [manifests.get, idx] }]
+                  - call: [refs.put, digest, 1]
+                  - decl: [bpath, string, { call: [kontor.store.blob_path, <.data_dir, digest] }]
+                  - if:
+                      condition: { call: [io.exists, bpath] }
+                      then:
+                        - decl: [body, string, { call: [io.read_file, bpath] }]
+                        - decl: [mentioned, list<string>, { call: [regex.find_all, "sha256:[0-9a-f]{64}", body] }]
+                        - decl: [ridx, i32, 0]
+                        - while:
+                            condition: { lt: [ridx, mentioned.len] }
+                            body:
+                              - decl: [ref_text, string, { call: [mentioned.get, ridx] }]
+                              - call: [refs.put, { call: [ref_text.substr, 7] }, 1]
+                              - set: [ridx, { +: [ridx, 1] }]
+                  - set: [idx, { +: [idx, 1] }]
+            - return: [refs]
+
+      # Deletes unreferenced blobs a sweep saw unreferenced more than the
+      # grace period ago; returns the bytes freed.
+      - def:
+          name: sweep
+          args: [[now_ms, i64]]
+          return: i64
+          body:
+            - decl: [refs, map<string:i32>, { call: [<.referenced] }]
+            - decl: [seen, map<string:string>]
+            - decl: [raw, string, { call: [kontor.store.read_text, "${<.data_dir}/retention/sweep.txt"] }]
+            - decl: [lines, list<string>, { call: [raw.split, "\n"] }]
+            - decl: [idx, i32, 0]
+            - while:
+                condition: { lt: [idx, lines.len] }
+                body:
+                  - decl: [line, string, { call: [lines.get, idx] }]
+                  - decl: [tab, i32, { call: [line.index_of, "\t"] }]
+                  - if:
+                      condition: { gt: [tab, 0] }
+                      then:
+                        - call: [seen.put, { call: [line.substr, 0, tab] }, { call: [line.substr, { +: [tab, 1] }] }]
+                  - set: [idx, { +: [idx, 1] }]
+            - decl: [blobs, list<string>, { call: [io.glob, "${<.data_dir}/cas/*/*"] }]
+            - decl: [freed, i64, 0]
+            - decl: [still, string, ""]
+            - set: [idx, 0]
+            - while:
+                condition: { lt: [idx, blobs.len] }
+                body:
+                  - decl: [bpath, string, { call: [blobs.get, idx] }]
+                  - decl: [blob_file, path, bpath]
+                  - decl: [digest, string, { call: [blob_file.name] }]
+                  - if:
+                      condition: { eq: [{ call: [refs.contains, digest] }, 0] }
+                      then:
+                        - decl: [first, i64, now_ms]
+                        - if:
+                            condition: { eq: [{ call: [seen.contains, digest] }, 1] }
+                            then:
+                              - decl: [first_text, string, { call: [seen.get, digest] }]
+                              - decl: [first_seen, i64, first_text]
+                              - set: [first, first_seen]
+                        - if:
+                            condition: { gt: [{ -: [now_ms, first] }, <.grace_ms] }
+                            then:
+                              - set: [freed, { +: [freed, { call: [io.file_size, bpath] }] }]
+                              - call: [io.remove, bpath]
+                            else:
+                              - set: [still, "${still}${digest}\t${first}\n"]
+                  - set: [idx, { +: [idx, 1] }]
+            - call: [kontor.store.write_text, <.data_dir, "${<.data_dir}/retention", "sweep.txt", still]
+            - return: [freed]
+
+      # Session tokens past their expiry (FW-26); returns how many went.
+      - def:
+          name: sweep_sessions
+          args: [[now_ms, i64]]
+          return: i32
+          body:
+            - decl: [tdir, string, "${<.data_dir}/auth/tokens"]
+            - decl: [files, list<string>, { call: [kontor.store.list_files, tdir] }]
+            - decl: [count, i32, 0]
+            - decl: [idx, i32, 0]
+            - while:
+                condition: { lt: [idx, files.len] }
+                body:
+                  - decl: [tpath, string, "${tdir}/${{ call: [files.get, idx] }}"]
+                  - decl: [doc, ptr<yaml_doc>, { call: [yaml.parse_file, tpath] }]
+                  - decl: [expires, string, { call: [yaml.scalar, { call: [yaml.get, { call: [yaml.root, doc] }, "expires_ms"] }] }]
+                  - call: [yaml.free, doc]
+                  - if:
+                      condition: { gt: [expires.len, 0] }
+                      then:
+                        - decl: [until_ms, i64, expires]
+                        - if:
+                            condition: { lt: [until_ms, now_ms] }
+                            then:
+                              - call: [io.remove, tpath]
+                              - set: [count, { +: [count, 1] }]
+                  - set: [idx, { +: [idx, 1] }]
+            - return: [count]
+
+      # ── run log (FW-49) ──────────────────────────────────────────────────
+      - def:
+          name: log_run
+          args: [[run_id, string], [entry_json, string]]
+          body:
+            - decl: [rdir, string, "${<.data_dir}/retention/runs"]
+            - call: [kontor.store.write_text, <.data_dir, rdir, "${run_id}.json", entry_json]
+            - decl: [names, list<string>, { call: [kontor.store.list_files, rdir] }]
+            - decl: [extra, i32, { -: [names.len, <.keep_runs] }]
+            - decl: [idx, i32, 0]
+            - while:
+                condition: { lt: [idx, extra] }
+                body:
+                  - call: [io.remove, "${rdir}/${{ call: [names.get, idx] }}"]
+                  - set: [idx, { +: [idx, 1] }]
+
+      # Newest first.  Run ids start with the zero-padded start time, so
+      # file name order is time order.
+      - def:
+          name: runs_json
+          return: string
+          body:
+            - decl: [rdir, string, "${<.data_dir}/retention/runs"]
+            - decl: [names, list<string>, { call: [kontor.store.list_files, rdir] }]
+            - decl: [out, string, ""]
+            - decl: [idx, i32, { -: [names.len, 1] }]
+            - while:
+                condition: { ge: [idx, 0] }
+                body:
+                  - if: { condition: { gt: [out.len, 0] }, then: [{ set: [out, "${out},"] }] }
+                  - decl: [rfile, string, "${rdir}/${{ call: [names.get, idx] }}"]
+                  - set: [out, "${out}${{ call: [kontor.store.read_text, rfile] }}"]
+                  - set: [idx, { -: [idx, 1] }]
+            - return: ["{\"runs\":[${out}]}"]
+
+      - def:
+          name: new_run_id
+          args: [[now_ms, i64]]
+          return: string
+          body:
+            - decl: [stamp, string, "${now_ms}"]
+            - while:
+                condition: { lt: [stamp.len, 15] }
+                body:
+                  - set: [stamp, "0${stamp}"]
+            - return: ["${stamp}-${{ call: [math.random_hex, 3] }}"]
+
+      # Is a scheduled run due at `now_ms`?  Once per UTC day, at or after
+      # the policy's "HH:MM".  Marks the day when it says yes.
+      - def:
+          name: schedule_due
+          args: [[now_ms, i64]]
+          return: i32
+          body:
+            - decl: [planner, ptr<kontor.retention.Planner>, { new: kontor.retention.Planner }]
+            - call: [planner.set_policy, { call: [<.policy_text] }]
+            - if:
+                condition: { eq: [planner.schedule.len, 0] }
+                then:
+                  - return: [0]
+            # time.format_utc: "YYYY-MM-DD HH:MM"
+            - decl: [stamp, string, { call: [time.format_utc, now_ms] }]
+            - decl: [day, string, { call: [stamp.substr, 0, 10] }]
+            - decl: [now_h, i32, { call: [stamp.substr, 11, 2] }]
+            - decl: [now_m, i32, { call: [stamp.substr, 14, 2] }]
+            - decl: [at_h, i32, { call: [planner.schedule.substr, 0, 2] }]
+            - decl: [at_m, i32, { call: [planner.schedule.substr, 3, 2] }]
+            - decl: [now_min, i32, { +: [{ "*": [now_h, 60] }, now_m] }]
+            - decl: [at_min, i32, { +: [{ "*": [at_h, 60] }, at_m] }]
+            - if:
+                condition: { or: [{ eq: [day, <.last_scheduled_day] }, { lt: [now_min, at_min] }] }
+                then:
+                  - return: [0]
+            - set: [<.last_scheduled_day, day]
+            - return: [1]
