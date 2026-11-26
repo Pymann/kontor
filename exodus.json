@@ -3,7 +3,7 @@
     "name": "kontor",
     "version": "0.1.0",
     "license": [
-        "MIT"
+        "LicenseRef-Pymann-Commercial-1.0"
     ],
     "output_type": "executable",
     "sources": [

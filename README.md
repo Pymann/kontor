@@ -322,3 +322,14 @@ graph) runs under valgrind with 0 invalid accesses.
 - LDAP is asked on every Basic-authenticated request (no cache); SAML session
   tokens expire, but expired token files are not swept.
 - No garbage collection of unreferenced blobs after manifest deletes.
+
+## License
+
+kontor is **not open source**. It is *source-available* under the
+[Pymann Commercial Source License 1.0](LICENSE)
+(`LicenseRef-Pymann-Commercial-1.0`). Reading the code, evaluation (up to 30
+days) and private, non-commercial use are free. Any production use requires a
+commercial license: **EUR 5,000 per year** per organization (plus VAT).
+Contact: [github.com/Pymann](https://github.com/Pymann).
+
+Dependencies such as aiml and exodus keep their own licenses (MIT).
